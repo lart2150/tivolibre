@@ -1,0 +1,6 @@
+# The Gradle wrapper ships both a POSIX shell script and a Windows batch file, and each
+# only works with its platform's line endings. Pin them so Git can't normalize either one.
+gradlew     text eol=lf
+gradlew.bat text eol=crlf
+
+*.jar binary

@@ -25,6 +25,7 @@ package net.straylightlabs.tivolibre;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import org.apache.commons.cli.*;
+import org.apache.commons.cli.help.HelpFormatter;
 import org.slf4j.LoggerFactory;
 import org.w3c.dom.Document;
 
@@ -168,8 +169,14 @@ public class DecoderApp {
     }
 
     private void showUsage() {
-        HelpFormatter formatter = new HelpFormatter();
-        formatter.printHelp("java -jar tivo-libre.jar -i input.TiVo -o output.mpg -m 0123456789", options);
+        // No option declares a "since" version, so suppress that column
+        HelpFormatter formatter = HelpFormatter.builder().setShowSince(false).get();
+        try {
+            formatter.printHelp("java -jar TivoDecoder.jar -i input.TiVo -o output.mpg -m 0123456789",
+                    null, options, null, false);
+        } catch (IOException e) {
+            logger.error("Error showing usage: {}", e.getLocalizedMessage());
+        }
     }
 
     private void decode(InputStream input, OutputStream output, DecoderOptions options) {
@@ -211,16 +218,16 @@ public class DecoderApp {
         options.addOption("v", "version", false, "Show version and exit");
         options.addOption("x", "no-video", false, "Exit after processing metadata; doesn't decode the video");
         Option option = Option.builder().longOpt("compat-mode").desc("Don't fix problems in the TiVo file; produces output that " +
-                "is binary compatible with the TiVo DirectShow filter").build();
+                "is binary compatible with the TiVo DirectShow filter").get();
         options.addOption(option);
         option = Option.builder("o").argName("FILENAME").longOpt("output").hasArg().
-                desc("Output file (defaults to standard output)").build();
+                desc("Output file (defaults to standard output)").get();
         options.addOption(option);
         option = Option.builder("i").argName("FILENAME").longOpt("input").hasArg().
-                desc("File to decode (defaults to standard input)").build();
+                desc("File to decode (defaults to standard input)").get();
         options.addOption(option);
         option = Option.builder("m").argName("MAK").longOpt("mak").hasArg().
-                desc("Your media access key (will be saved between program executions)").build();
+                desc("Your media access key (will be saved between program executions)").get();
         options.addOption(option);
 
         return options;

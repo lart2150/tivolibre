@@ -20,111 +20,193 @@
  *
  */
 
-apply plugin: 'java'
-apply plugin: 'maven'
-apply plugin: 'signing'
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'signing'
+}
 
 group = 'net.straylightlabs'
-archivesBaseName = 'tivo-libre'
 version = '0.7.4'
+description = 'TivoLibre is a Java library for decoding TiVo files to standard MPEG files'
+
+java {
+    withJavadocJar()
+    withSourcesJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    // Build with whatever JDK runs Gradle (17 or newer) but emit bytecode the documented minimum
+    // runtime can load. Deliberately not a toolchain: Gradle matches a toolchain languageVersion
+    // exactly, so pinning one without a provisioning resolver fails for anyone whose only JDK is
+    // a different release, and options.release already fixes the target.
+    options.release = 11
+    options.encoding = 'UTF-8'
+}
+
+tasks.withType(Javadoc).configureEach {
+    options.encoding = 'UTF-8'
+    // These sources predate strict doclint; missing @param tags shouldn't fail a release build.
+    options.addStringOption('Xdoclint:none', '-quiet')
+}
 
 repositories {
     mavenCentral()
 }
 
+configurations {
+    // Resolves the app-only dependencies below so appJar can bundle them. Kept separate from
+    // the declarable compileOnly configuration it extends, because a single configuration
+    // shouldn't be both declarable and resolvable.
+    appRuntime {
+        canBeConsumed = false
+        canBeResolved = true
+        extendsFrom compileOnly
+    }
+}
+
 dependencies {
-    testCompile 'junit:junit:4.12'
-    compile 'commons-cli:commons-cli:1.3.1'
-    compile 'commons-codec:commons-codec:1.10'
-    compile group: 'org.slf4j', name: 'slf4j-api', version: '1.7.21'
-    compile group: 'ch.qos.logback', name: 'logback-classic', version: '1.1.7'
+    // No slf4j or commons-codec type appears in TivoLibre's public signatures, so consumers
+    // get these at runtime without compiling against them.
+    implementation 'org.slf4j:slf4j-api:2.0.19'
+    implementation 'commons-codec:commons-codec:1.22.1'
+
+    // Only DecoderApp needs these. Declaring them compileOnly bundles them into
+    // TivoDecoder.jar while keeping them out of the library's POM, so embedding TivoLibre
+    // doesn't drag in a logging backend or an argument parser.
+    compileOnly 'commons-cli:commons-cli:1.11.0'
+    compileOnly 'ch.qos.logback:logback-classic:1.6.3'
+
+    testImplementation 'junit:junit:4.13.2'
+    testRuntimeOnly 'ch.qos.logback:logback-classic:1.6.3'
 }
 
-task javadocJar(type: Jar) {
-    classifier = 'javadoc'
-    from javadoc
+tasks.named('test') {
+    useJUnit()
+
+    // TivoDecoderTest decodes a real recording end to end. Supply testFile, outFile and mak
+    // (on the command line as -PtestFile=... or in gradle.properties) to run it; without them
+    // the rest of the suite still runs.
+    def sampleFile = providers.gradleProperty('testFile')
+    def sampleOut = providers.gradleProperty('outFile')
+    def sampleMak = providers.gradleProperty('mak')
+    def hasSample = sampleFile.present && sampleOut.present && sampleMak.present
+
+    if (hasSample) {
+        systemProperty 'testFile', sampleFile.get()
+        systemProperty 'outFile', sampleOut.get()
+        // Deliberately never logged: the MAK is a secret.
+        systemProperty 'mak', sampleMak.get()
+    } else {
+        exclude '**/TivoDecoderTest.class'
+    }
+
+    def sampleDescription = hasSample
+            ? "Running end-to-end tests on '${sampleFile.get()}'."
+            : 'Skipping TivoDecoderTest: set testFile, outFile and mak to run it.'
+    doFirst {
+        logger.lifecycle(sampleDescription)
+    }
+
+    testLogging {
+        events 'failed'
+        exceptionFormat = 'full'
+    }
 }
 
-task sourcesJar(type: Jar) {
-    classifier = 'sources'
-    from sourceSets.main.allSource
-}
+tasks.register('appJar', Jar) {
+    group = 'build'
+    description = 'Builds the runnable command line app with its dependencies bundled.'
+    archiveFileName = 'TivoDecoder.jar'
+    // Dependency jars overlap on shared metadata paths; keep the first copy of each entry
+    // rather than writing duplicates. Closes #26.
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
-jar {
-    baseName 'tivo-libre'
-}
+    manifest {
+        attributes(
+                'Main-Class': 'net.straylightlabs.tivolibre.DecoderApp',
+                'Implementation-Title': 'TivoLibre',
+                'Implementation-Version': project.version
+        )
+    }
 
-task appJar(type: Jar) {
-    archiveName = 'TivoDecoder.jar'
+    from sourceSets.main.output
     from('src/main/app-resources') {
         include '*.xml'
     }
-    manifest {
-        attributes "Main-Class": "net.straylightlabs.tivolibre.DecoderApp"
+    from({
+        (configurations.runtimeClasspath + configurations.appRuntime).collect {
+            it.isDirectory() ? it : zipTree(it)
+        }
+    }) {
+        // Jar signatures don't survive repackaging, and every dependency brings its own
+        // manifest, licence files and module descriptor. META-INF/services must stay: that is
+        // how slf4j 2.x discovers the logback binding.
+        exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/*.EC'
+        exclude 'META-INF/MANIFEST.MF', 'META-INF/INDEX.LIST'
+        exclude 'META-INF/LICENSE*', 'META-INF/NOTICE*', 'META-INF/DEPENDENCIES'
+        exclude 'META-INF/versions/**'
+        exclude 'module-info.class'
     }
-    from {
-        configurations.compile.collect { it.isDirectory() ? it : zipTree(it) }
-    }
-    with jar
 }
 
-test {
-    println "Running tests on input file '$testFile'."
-    println "Using MAK '$mak'"
-    systemProperties['mak'] = mak
-    systemProperties['testFile'] = testFile
-    systemProperties['outFile'] = outFile
+tasks.named('assemble') {
+    dependsOn 'appJar'
 }
 
-artifacts {
-    archives javadocJar, sourcesJar
-}
-
-signing {
-    sign configurations.archives
-}
-
-uploadArchives {
-    repositories {
-        mavenDeployer {
-            beforeDeployment { MavenDeployment deployment -> signing.signPom(deployment) }
-
-            repository(url: "https://oss.sonatype.org/service/local/staging/deploy/maven2/") {
-                authentication(userName: ossrhUsername, password: ossrhPassword)
-            }
-
-            snapshotRepository(url: "https://oss.sonatype.org/content/repositories/snapshots/") {
-                authentication(userName: ossrhUsername, password: ossrhPassword)
-            }
-
-            pom.project {
-                name 'TivoLibre'
-                packaging 'jar'
-                artifactId 'tivo-libre'
-                description 'TivoLibre is a Java library for decoding TiVo files to standard MPEG files'
-                url 'https://github.com/fflewddur/tivolibre'
-
-                scm {
-                    connection 'scm:git:https://github.com/fflewddur/tivolibre.git'
-                    developerConnection 'scm:git:https://github.com/fflewddur/tivolibre.git'
-                    url 'https://github.com/fflewddur/tivolibre.git'
-                }
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            pom {
+                name = 'TivoLibre'
+                description = project.description
+                url = 'https://github.com/fflewddur/tivolibre'
+                packaging = 'jar'
 
                 licenses {
                     license {
-                        name 'GNU General Public License (GPL)'
-                        url 'http://www.gnu.org/licenses/gpl.txt'
+                        name = 'GNU General Public License (GPL)'
+                        url = 'http://www.gnu.org/licenses/gpl.txt'
                     }
                 }
 
                 developers {
                     developer {
-                        id 'fflewddur'
-                        name 'Todd Kulesza'
-                        email 'todd@dropline.net'
+                        id = 'fflewddur'
+                        name = 'Todd Kulesza'
+                        email = 'todd@dropline.net'
                     }
+                }
+
+                scm {
+                    connection = 'scm:git:https://github.com/fflewddur/tivolibre.git'
+                    developerConnection = 'scm:git:https://github.com/fflewddur/tivolibre.git'
+                    url = 'https://github.com/fflewddur/tivolibre.git'
                 }
             }
         }
     }
+
+    repositories {
+        maven {
+            name = 'central'
+            // OSSRH (oss.sonatype.org) reached end of life on 2025-06-30, so the URL this
+            // build used to point at no longer resolves. This is Sonatype's
+            // Nexus-2-compatible endpoint for the Central Portal; override with
+            // -PpublishUrl=... to publish somewhere else.
+            url = providers.gradleProperty('publishUrl').getOrElse(
+                    'https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/')
+            credentials {
+                username = providers.gradleProperty('ossrhUsername').getOrElse('')
+                password = providers.gradleProperty('ossrhPassword').getOrElse('')
+            }
+        }
+    }
+}
+
+signing {
+    // Sign only when actually publishing, so `gradlew build` works without a GPG key.
+    setRequired { gradle.taskGraph.allTasks.any { it.name.startsWith('publish') } }
+    sign publishing.publications.mavenJava
 }

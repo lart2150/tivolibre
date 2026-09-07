@@ -67,7 +67,8 @@ public class TivoDecoderTest {
         filename = System.getProperty("outFile");
         assertNotNull(filename);
         try {
-            outputStream = Files.newOutputStream(Paths.get(filename), StandardOpenOption.CREATE);
+            outputStream = Files.newOutputStream(Paths.get(filename), StandardOpenOption.CREATE,
+                    StandardOpenOption.TRUNCATE_EXISTING);
         } catch (IOException e) {
             logger.error("IOException opening outputStream '{}': ", filename, e);
         }
@@ -79,10 +80,21 @@ public class TivoDecoderTest {
 
     @After
     public void after() {
+        // before() may have failed part way through, so guard both. Closing the output stream
+        // matters on Windows, where a leaked handle can make the next test fail to reopen the file.
         try {
-            inputStream.close();
+            if (inputStream != null) {
+                inputStream.close();
+            }
         } catch (IOException e) {
             logger.error("IOException closing inputStream: ", e);
+        }
+        try {
+            if (outputStream != null) {
+                outputStream.close();
+            }
+        } catch (IOException e) {
+            logger.error("IOException closing outputStream: ", e);
         }
     }
 

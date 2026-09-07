@@ -40,6 +40,11 @@ class TransportStreamPacket {
 
     private final static Logger logger = LoggerFactory.getLogger(TransportStreamPacket.class);
 
+    /** The characters "TiVo", which open a TiVo private data payload */
+    private static final int TIVO_SIGNATURE = 0x5469566f;
+    private static final int TIVO_VALIDATOR = 0x8103;
+    private static final int SIGNATURE_LENGTH = 6;
+
     public static TransportStreamPacket createFrom(ByteBuffer source, long packetId) throws IOException {
         TransportStreamPacket packet = new TransportStreamPacket();
         packet.setPacketId(packetId);
@@ -64,6 +69,11 @@ class TransportStreamPacket {
 
     private Header readHeader(ByteBuffer source) {
         int headerLength = Integer.BYTES;
+        if (source.remaining() < Integer.BYTES) {
+            throw new TransportStreamException(String.format(
+                    "Packet %d holds only %d bytes, too few for a TS header", packetId, source.remaining()));
+        }
+
         int headerBits = source.getInt();
         int adaptationFieldLength;
         int adaptationFieldBits;
@@ -73,20 +83,27 @@ class TransportStreamPacket {
             throw new TransportStreamException("TransportStream appears to be corrupt, cannot find sync bytes");
         }
 
-        if (header.hasAdaptationField) {
+        if (header.hasAdaptationField && source.remaining() >= 1) {
             adaptationFieldLength = source.get() & 0xff;
-            if (adaptationFieldLength > 0) {
+            headerLength += adaptationFieldLength > 0 ? adaptationFieldLength + 1 : 1;
+            if (adaptationFieldLength > 0 && source.remaining() >= 1) {
+                // The flags are optional to us; a truncated packet can cut them off without
+                // changing where the payload would have started.
                 adaptationFieldBits = source.get() & 0xff;
                 adaptationField = new AdaptationField(adaptationFieldBits);
-                headerLength += (adaptationFieldLength + 1);
-            } else {
-                headerLength++;
             }
+        } else if (header.hasAdaptationField) {
+            // Truncated before its adaptation field, so there is no payload to find
+            logger.warn("Packet {} declares an adaptation field but was cut off before it", packetId);
         }
 
-        if (headerLength > TransportStream.FRAME_SIZE) {
+        if (headerLength > source.capacity()) {
+            // A bogus adaptation_field_length would otherwise leave us with a negative payload length.
             // TODO fix adaptation field length when not in compatibility mode
-            headerLength = TransportStream.FRAME_SIZE;
+            logger.warn(String.format("Header length %d exceeds packet size %d for packet %d; clamping",
+                    headerLength, source.capacity(), packetId)
+            );
+            headerLength = source.capacity();
         }
         header.setLength(headerLength);
 
@@ -109,6 +126,11 @@ class TransportStreamPacket {
      */
     public boolean needsDecoding() {
         return (isScrambled() && header.getLength() + pesHeaderOffset < buffer.capacity());
+    }
+
+    /** The size of this packet in bytes, without copying it the way getBytes() does. */
+    public int length() {
+        return buffer.capacity();
     }
 
     public byte[] getBytes() {
@@ -160,10 +182,6 @@ class TransportStreamPacket {
 //    public long getPacketId() {
 //        return packetId;
 //    }
-
-    public PacketType getPacketType() {
-        return header.getType();
-    }
 
     public int getPID() {
         return header.getPID();
@@ -217,6 +235,34 @@ class TransportStreamPacket {
         dataOffset += bytes;
     }
 
+    /**
+     * The number of unread data bytes left in this packet. PSI sections can be longer than the packet that
+     * carries them, so parsers need to know when to stop rather than reading off the end of the buffer.
+     */
+    public int remainingDataLength() {
+        return Math.max(0, buffer.capacity() - header.getLength() - dataOffset);
+    }
+
+    /**
+     * Returns true if this packet's payload starts with the TiVo private data signature ("TiVo" followed by
+     * the 0x8103 validator). Some recordings label the private data stream with a stream type we don't
+     * recognize, so we fall back on sniffing the payload to find the Turing keys.
+     *
+     * @param minimumLength the number of data bytes the caller goes on to read, so a packet too short to
+     *                      parse is rejected here rather than part way through
+     */
+    public boolean looksLikeTivoPrivateData(int minimumLength) {
+        if (minimumLength < SIGNATURE_LENGTH) {
+            throw new IllegalArgumentException(
+                    "Cannot match the TiVo signature in fewer than " + SIGNATURE_LENGTH + " bytes");
+        }
+        if (isScrambled() || remainingDataLength() < minimumLength) {
+            return false;
+        }
+        int base = header.getLength() + dataOffset;
+        return buffer.getInt(base) == TIVO_SIGNATURE && (buffer.getShort(base + 4) & 0xffff) == TIVO_VALIDATOR;
+    }
+
     public void setIsPmt(boolean val) {
         isPmt = val;
     }
@@ -251,38 +297,6 @@ class TransportStreamPacket {
         }
         s += String.format("%nBody: isPmt=%s, pesHeaderOffset=%d", isPmt, pesHeaderOffset);
         return s;
-    }
-
-    public enum PacketType {
-        PROGRAM_ASSOCIATION_TABLE(0x0000, 0x0000),
-        CONDITIONAL_ACCESS_TABLE(0x0001, 0x0001),
-        RESERVED(0x0002, 0x000F),
-        NETWORK_INFORMATION_TABLE(0x0010, 0x0010),
-        SERVICE_DESCRIPTION_TABLE(0x0011, 0x0011),
-        EVENT_INFORMATION_TABLE(0x0012, 0x0012),
-        RUNNING_STATUS_TABLE(0x0013, 0x0013),
-        TIME_DATE_TABLE(0x0014, 0x0014),
-        RESERVED2(0x0015, 0x001F),
-        AUDIO_VIDEO_PRIVATE_DATA(0x0020, 0x1FFE),
-        NULL(0x1FFF, 0x1FFF),
-        NONE(0xFFFF, 0xFFFF);
-
-        private final int lowVal;
-        private final int highVal;
-
-        PacketType(int lowVal, int highVal) {
-            this.lowVal = lowVal;
-            this.highVal = highVal;
-        }
-
-        public static PacketType valueOf(int pid) {
-            for (PacketType type : values()) {
-                if (type.lowVal <= pid && pid <= type.highVal) {
-                    return type;
-                }
-            }
-            return NONE;
-        }
     }
 
     static class Header {
@@ -342,10 +356,6 @@ class TransportStreamPacket {
 
         public int getPID() {
             return pid;
-        }
-
-        public PacketType getType() {
-            return PacketType.valueOf(pid);
         }
 
         public boolean isScrambled() {

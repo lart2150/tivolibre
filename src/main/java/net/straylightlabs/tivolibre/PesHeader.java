@@ -38,6 +38,12 @@ class PesHeader {
     private int bitLength;
     private boolean isScrambled;
     private StartCode currentStartCode;
+    private int currentStartCodeValue;
+    /**
+     * Bits the current start code occupied in this packet. Normally the 24 bit prefix plus the
+     * 8 bit value, but a prefix can straddle a packet boundary, leaving only the value here.
+     */
+    private int startCodeBitLength;
     private StartCode incompleteStartCode;
     private int trailingZeroBits;
     private int priorTrailingZeroBits;
@@ -50,12 +56,16 @@ class PesHeader {
     private static int NOT_A_START_CODE = 0xffffffff;
     private static int BITS_PER_BYTE = 8;
     private static int BITS_PER_INT = 32;
+    private static final int EXTENSION_ID_BIT_LEN = 4;
+    private static final int UNKNOWN_START_CODE_VALUE = -1;
 
     PesHeader() {
     }
 
-    private PesHeader(ByteBuffer source, StartCode code, int priorTrailingZeroBits, boolean lastHeaderEndedWithStartPrefix) {
+    private PesHeader(ByteBuffer source, StartCode code, int codeValue, int priorTrailingZeroBits,
+                      boolean lastHeaderEndedWithStartPrefix) {
         buffer = source;
+        currentStartCodeValue = codeValue;
         this.priorTrailingZeroBits = priorTrailingZeroBits;
         try {
             if (code == null) {
@@ -71,11 +81,12 @@ class PesHeader {
     }
 
     static PesHeader createFrom(ByteBuffer buffer) {
-        return new PesHeader(buffer, null, 0, false);
+        return new PesHeader(buffer, null, UNKNOWN_START_CODE_VALUE, 0, false);
     }
 
-    static PesHeader createFrom(ByteBuffer buffer, StartCode code, int priorTrailingZeroBits, boolean lastHeaderEndedWithStartPrefix) {
-        return new PesHeader(buffer, code, priorTrailingZeroBits, lastHeaderEndedWithStartPrefix);
+    static PesHeader createFrom(ByteBuffer buffer, StartCode code, int codeValue, int priorTrailingZeroBits,
+                                boolean lastHeaderEndedWithStartPrefix) {
+        return new PesHeader(buffer, code, codeValue, priorTrailingZeroBits, lastHeaderEndedWithStartPrefix);
     }
 
     /**
@@ -102,6 +113,11 @@ class PesHeader {
         return incompleteStartCode;
     }
 
+    /** The raw byte behind getUnfinishedStartCode(), for diagnostics on the continuation path. */
+    int getUnfinishedStartCodeValue() {
+        return currentStartCodeValue;
+    }
+
     int getTrailingZeroBits() {
         return trailingZeroBits;
     }
@@ -117,6 +133,12 @@ class PesHeader {
             return 0;
         }
 
+        if (bitLength < 0) {
+            // No path should get here; a negative length would become a negative decrypt offset
+            logger.warn("PES header length went negative ({} bits); treating it as zero", bitLength);
+            return 0;
+        }
+
         int bytes = bitLength / BITS_PER_BYTE;
         if (bitLength % BITS_PER_BYTE != 0) {
             // If the header ends mid-byte, it will be padded to keep the following data byte-aligned
@@ -127,14 +149,19 @@ class PesHeader {
 
     private void parseBytes(boolean lastHeaderEndedWithStartPrefix) {
         int startCodePrefix = START_CODE_PREFIX;
+        startCodeBitLength = 0;
         if (!lastHeaderEndedWithStartPrefix) {
             if (!nextStartCode()) {
                 return;
             }
-            startCodePrefix = getAndAdvanceBits(START_CODE_PREFIX_BIT_LEN - priorTrailingZeroBits);
+            int prefixBitLength = START_CODE_PREFIX_BIT_LEN - priorTrailingZeroBits;
+            startCodePrefix = getAndAdvanceBits(prefixBitLength);
+            startCodeBitLength += prefixBitLength;
         }
         priorTrailingZeroBits = 0;
         int startCodeValue = getAndAdvanceBits(BITS_PER_BYTE);
+        startCodeBitLength += BITS_PER_BYTE;
+        currentStartCodeValue = startCodeValue;
         StartCode startCode = StartCode.valueOf(startCodeValue);
         parseBytesFromStartCode(startCodePrefix, startCode);
     }
@@ -149,7 +176,12 @@ class PesHeader {
                     break;
                 case EXTENSION:
                     if (!parseExtensionHeader()) {
-                        rewind(BITS_PER_INT);
+                        // We don't know how long this extension is, so give back only the extension_id we
+                        // read and treat everything after the start code as payload. TiVo's filter leaves
+                        // the four bytes of the extension start code in the clear and encrypts from there;
+                        // dropping them from the header length instead puts the keystream out of phase and
+                        // corrupts the rest of the packet.
+                        rewind(EXTENSION_ID_BIT_LEN);
                         return;
                     }
                     break;
@@ -166,14 +198,17 @@ class PesHeader {
                     parseSequenceHeader();
                     break;
                 case SLICE:
-                    rewind(BITS_PER_INT);
+                    rewind(startCodeBitLength);
                     return;
                 case USER_DATA:
                     parseUserData();
                     break;
                 default:
-                    logger.warn(String.format("Unknown PES start code: 0x%s", startCode));
-                    rewind(BITS_PER_INT);
+                    // Treat it as the start of the payload, the same as a slice start code
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("Unhandled PES start code: {}", describeStartCode());
+                    }
+                    rewind(startCodeBitLength);
                     return;
             }
 
@@ -185,6 +220,8 @@ class PesHeader {
                 try {
                     startCodePrefix = getAndAdvanceBits(START_CODE_PREFIX_BIT_LEN);
                     startCodeValue = getAndAdvanceBits(BITS_PER_BYTE);
+                    startCodeBitLength = START_CODE_PREFIX_BIT_LEN + BITS_PER_BYTE;
+                    currentStartCodeValue = startCodeValue;
                     currentStartCode = StartCode.valueOf(startCodeValue);
                 } catch (BufferUnderflowException e) {
                     // We ran out of data while reading the startCodeValue
@@ -382,8 +419,14 @@ class PesHeader {
         }
     }
 
+    private String describeStartCode() {
+        return currentStartCodeValue == UNKNOWN_START_CODE_VALUE
+                ? String.valueOf(currentStartCode)
+                : String.format("0x%02x", currentStartCodeValue);
+    }
+
     private boolean parseExtensionHeader() {
-        int extensionType = getAndAdvanceBits(4);
+        int extensionType = getAndAdvanceBits(EXTENSION_ID_BIT_LEN);
         switch (ExtensionType.valueOf(extensionType)) {
             case SEQUENCE:
                 parseSequenceExtension();
@@ -395,7 +438,12 @@ class PesHeader {
                 parsePictureCodingExtension();
                 break;
             default:
-                logger.warn("Unknown PES extension header type: {}", extensionType);
+                // Types we don't model (quantiser matrix, copyright, picture display, and the scalable
+                // extensions) end the header scan; see the caller for why the start code still counts.
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Unhandled PES extension header type: {} (start code {})",
+                            extensionType, describeStartCode());
+                }
                 return false;
         }
         return true;

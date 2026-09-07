@@ -20,15 +20,15 @@ To view the full list of options, use the -h command-line parameter:
 # API Usage
 The tivo-libre.jar file exposes the TivoDecoder class. Use the provided Builder to create new TivoDecoder instances. Building a TivoDecoder requires an InputStream, an OutputStream, and a String representing the MAK associated with the InputStream; additional parameters are optional. Call the `decode()` method to start the coding process; `decode()` is a blocking method that returns `true` on success and `false` on failure.
 
-    // Assume @in and @out are Path objects and @mak is a String
+    // Assume @in and @out are Path objects, @mak is a String, and @logger is your own SLF4J Logger
     try (BufferedInputStream inputStream = new BufferedInputStream(new FileInputStream(in.toFile()));
         BufferedOutputStream outputStream = new BufferedOutputStream(new FileOutputStream(out.toFile()))) {
         TivoDecoder decoder = new TivoDecoder.Builder().input(inputStream).output(outputStream).mak(mak).build();
         decoder.decode();
     } catch (FileNotFoundException e) {
-        TivoDecoder.logger.error("Error: {}", e.getLocalizedMessage());
+        logger.error("Error: {}", e.getLocalizedMessage());
     } catch (IOException e) {
-        TivoDecoder.logger.error("Error reading/writing files: {}", e.getLocalizedMessage());
+        logger.error("Error reading/writing files: {}", e.getLocalizedMessage());
     }
 
 The TivoDecoder class also includes methods for fetching the metadata embedded in a TiVo file (`List<Document> getMetadata()`) and for processing a file's metadata without also decoding its audio and video streams (`boolean decodeMetadata()`).
@@ -36,21 +36,32 @@ The TivoDecoder class also includes methods for fetching the metadata embedded i
 TivoLibre can be configured to use your app's existing logging framework via the SLF4J logging facade.
 
 # Building
-TivoLibre uses the Gradle build system and expects a source .TiVo file to be available for running tests. You can specify the location of and MAK associated with this test file by creating a gradle.properties file and adjusting the following properties to point at your preferred test file:
+TivoLibre builds with the included Gradle wrapper, so you don't need Gradle installed. You only need a JDK 17 or newer:
 
-    # Specify settings for our unit tests
+    ./gradlew build        # or gradlew.bat on Windows
+
+That produces four artifacts in `build/libs`: the library (`tivo-libre-<version>.jar`) with its sources and javadoc jars, and the runnable app (`TivoDecoder.jar`).
+
+Most of the test suite runs against synthetic transport streams and needs no setup. The end-to-end test additionally decodes a real recording, and is skipped unless you supply a file, an output path, and its MAK:
+
+    ./gradlew build -PtestFile=/path/to/test.TiVo -PoutFile=/path/to/test.mpg -Pmak=0123456789
+
+To keep your MAK out of your shell history and off the process list, pass it through the environment instead:
+
+    ORG_GRADLE_PROJECT_mak=0123456789 ./gradlew build -PtestFile=... -PoutFile=...
+
+Any of these can also go in a `gradle.properties` file, which is not tracked by Git:
+
     mak = 0123456789
-    testFile = test-files\\test.TiVo
-    outFile = test-files\\test.mpg
-
-You can then build the project with the command `gradle build`.
+    testFile = test-files/test.TiVo
+    outFile = test-files/test.mpg
 
 # Dependencies
-TivoLibre makes use of the Stream APIs introduced in Java 8 and will not run on older Java virtual machines.
+TivoLibre requires Java 11 and will not run on older Java virtual machines.
 
-When used as a stand-alone application, TivoLibre requires commons-codec-1.9.jar and commons-cli-1.3.1.jar (or higher) from Apache Commons, as well as SLF4J and Logback. These libraries are already included in TivoDecoder.jar.
+When used as a stand-alone application, TivoLibre requires commons-codec-1.22.1.jar and commons-cli-1.11.0.jar (or higher) from Apache Commons, as well as SLF4J and Logback. These libraries are already included in TivoDecoder.jar.
 
-When used as a library, TivoLibre only requires commons-codec-1.9.jar (or higher) and slf4j-api.jar. If you wish to view log output from TivoLibre, you'll also need the appropriate SLF4J bindings for your preferred logging framework.
+When used as a library, TivoLibre only requires commons-codec-1.22.1.jar (or higher) and slf4j-api.jar. If you wish to view log output from TivoLibre, you'll also need the appropriate SLF4J bindings for your preferred logging framework.
 
 Gradle and Maven users can include these dependencies automatically by including TivoLibre from the Maven Central Repository, where it can be found with the ID *net.straylightlabs.tivo-libre*.
 

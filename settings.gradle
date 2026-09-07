@@ -1,0 +1,5 @@
+/*
+ * The project name sets both the jar base name and the published artifactId,
+ * so it deliberately differs from the directory name.
+ */
+rootProject.name = 'tivo-libre'
