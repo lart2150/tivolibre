@@ -44,6 +44,12 @@ class TransportStreamDecoder extends StreamDecoder {
     private boolean showDebugOutput;
     private final boolean compatibilityMode;
     private final Set<Integer> reportedTableErrors = new HashSet<>();
+    /** Bytes and packets left out of the output because decryption was paused. */
+    private long droppedBytes;
+    private long droppedPackets;
+    private long eventDroppedBytes;
+    private long eventDroppedPackets;
+    private int resyncEvents;
 
     private static final byte SYNC_BYTE_VALUE = 0x47;
     private static final int PAT_PID = 0x0000;
@@ -162,6 +168,7 @@ class TransportStreamDecoder extends StreamDecoder {
             }
         } catch (EOFException e) {
             logger.info("End of file reached");
+            logDroppedSummary();
             return decryptedSomething();
         } catch (IOException e) {
             logger.error("Error reading transport stream: ", e);
@@ -296,6 +303,9 @@ class TransportStreamDecoder extends StreamDecoder {
                     // Looks like we re-synchronized!
                     int unsynchronizedLength = currentPos - startPos;
                     if (unsynchronizedLength > 0) {
+                        resyncEvents++;
+                        eventDroppedBytes = 0;
+                        eventDroppedPackets = 0;
                         long deltaToNextInterval = DECRYPTION_PAUSED_INTERVAL - (bytesWritten & 0xfffff);
                         resumeDecryptionAtByte = bytesWritten + unsynchronizedLength;
                         logger.debug(String.format("Starting value for resumeDecryptionAtByte: 0x%x", resumeDecryptionAtByte));
@@ -366,9 +376,29 @@ class TransportStreamDecoder extends StreamDecoder {
                     bytesWritten, bytesWritten + length, bytesWritten, bytesWritten + length, offset, length)
             );
             outputStream.write(inputBuffer.array(), offset, length);
+        } else {
+            droppedBytes += length;
+            eventDroppedBytes += length;
         }
         // Pretend we wrote the extra bytes; we use this offset to determine when to resume decryption
         bytesWritten += length;
+    }
+
+    /**
+     * Report anything the decoder left out of the output. Without this a recording that lost
+     * several megabytes to signal loss looks exactly like a clean one, because decode() still
+     * returns true.
+     */
+    private void logDroppedSummary() {
+        if (droppedBytes > 0) {
+            logger.warn(String.format(
+                    "Recovered from %d loss of synchronization event(s), leaving %,d bytes "
+                            + "(%,d packets) out of the output. Use compatibility mode to keep them.",
+                    resyncEvents, droppedBytes, droppedPackets)
+            );
+        } else if (resyncEvents > 0) {
+            logger.warn(String.format("Recovered from %d loss of synchronization event(s)", resyncEvents));
+        }
     }
 
     /**
@@ -571,6 +601,12 @@ class TransportStreamDecoder extends StreamDecoder {
             logger.warn(String.format("Resuming decryption at 0x%x, bytesWritten = 0x%x",
                     resumeDecryptionAtByte, bytesWritten)
             );
+            if (eventDroppedBytes > 0) {
+                logger.warn(String.format(
+                        "Left %,d bytes (%,d packets) out of the output while decryption was paused",
+                        eventDroppedBytes, eventDroppedPackets)
+                );
+            }
             resumeDecryption();
         }
     }
@@ -628,6 +664,11 @@ class TransportStreamDecoder extends StreamDecoder {
         try {
             if (!decryptionPaused || compatibilityMode) {
                 outputStream.write(packetBytes);
+            } else {
+                droppedBytes += packetBytes.length;
+                droppedPackets++;
+                eventDroppedBytes += packetBytes.length;
+                eventDroppedPackets++;
             }
             bytesWritten += packetBytes.length;
         } catch (Exception e) {

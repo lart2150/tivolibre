@@ -218,7 +218,8 @@ public class DecoderApp {
         options.addOption("v", "version", false, "Show version and exit");
         options.addOption("x", "no-video", false, "Exit after processing metadata; doesn't decode the video");
         Option option = Option.builder().longOpt("compat-mode").desc("Don't fix problems in the TiVo file; produces output that " +
-                "is binary compatible with the TiVo DirectShow filter").get();
+                "is binary compatible with the TiVo DirectShow filter. Keeps the damaged sections that are " +
+                "otherwise left out of the output").get();
         options.addOption(option);
         option = Option.builder("o").argName("FILENAME").longOpt("output").hasArg().
                 desc("Output file (defaults to standard output)").get();
