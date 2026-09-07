@@ -1,0 +1,44 @@
+name: Build
+
+on:
+  push:
+    branches: ['**']
+    # The release workflow already builds tags, and the maven branch holds no source
+    tags-ignore: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Build and test
+        run: ./gradlew --no-daemon build
+
+      # The end-to-end test needs a real recording and a MAK, so it is skipped here. Everything
+      # else runs against the synthetic transport streams in TransportStreamBuilder.
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: build/reports/tests/test
+          if-no-files-found: ignore
+
+      - name: Upload jars
+        uses: actions/upload-artifact@v4
+        with:
+          name: jars
+          path: build/libs/*.jar

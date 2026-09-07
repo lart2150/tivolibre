@@ -39,7 +39,8 @@ public class TivoDecoder {
     private final boolean compatibilityMode;
     private TivoStream tivoStream;
 
-    public final static String VERSION = "0.7.4";
+    /** Kept in step with the version in build.gradle by VersionTest. */
+    public final static String VERSION = "0.8.0";
 
     private TivoDecoder(InputStream inputStream, OutputStream outputStream, String mak, boolean compatibilityMode) {
         this.inputStream = inputStream;

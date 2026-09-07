@@ -6,6 +6,27 @@ The latest release can always be found at https://github.com/fflewddur/tivolibre
 
 TivoLibre comes in two flavors: a runnable JAR (TivoDecoder.jar) and a lightweight library (tivo-libre.jar). If you plan to run TivoLibre directly from the command line, use TivoDecoder.jar. If you plan to embed TivoLibre in your own software project, we recommend using tivo-libre.jar.
 
+# Using TivoLibre from Gradle or Maven
+Releases are published to a Maven repository held on this repository's `maven` branch, which needs no authentication to read:
+
+    repositories {
+        maven {
+            url 'https://raw.githubusercontent.com/lart2150/tivolibre/maven/'
+            content { includeGroup 'net.straylightlabs' }
+        }
+        mavenCentral()
+    }
+
+    dependencies {
+        implementation 'net.straylightlabs:tivo-libre:0.8.0'
+    }
+
+The `content { includeGroup ... }` block keeps Gradle from looking there for anything else.
+
+That pulls in slf4j-api and commons-codec, and nothing else. If your build excludes slf4j-api because it used to consume the bundled `TivoDecoder.jar`, drop that exclusion: the library jar no longer contains a copy.
+
+Releases are also published to GitHub Packages, though GitHub requires a token to read from there even for a public repository, so the `maven` branch above is usually the easier route. Every release additionally attaches the jars to its [GitHub release](https://github.com/lart2150/tivolibre/releases).
+
 # Command Line Usage
 You can use TivoLibre as a stand-alone command-line app. By default, it will read from standard input and write to standard output. You can specify input and output files with the -i and -o command-line parameters, respectively. You must specify the media access key (MAK) for decoding the provided input file with the -m parameter. For example:
 

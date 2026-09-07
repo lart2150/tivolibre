@@ -1,0 +1,130 @@
+name: Release
+
+# Tag a commit to publish it:
+#     git tag v0.8.0 && git push origin v0.8.0
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish, e.g. v0.8.0'
+        required: true
+
+permissions:
+  contents: write   # create the release, and push the maven branch
+  packages: write   # publish to GitHub Packages
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Work out the version and check it against the build
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          BUILD_VERSION=$(./gradlew --no-daemon -q printVersion)
+          echo "Tag $TAG implies version $VERSION; build.gradle says $BUILD_VERSION"
+          if [ "$VERSION" != "$BUILD_VERSION" ]; then
+            echo "::error::Tag $TAG does not match the version in build.gradle ($BUILD_VERSION)."
+            exit 1
+          fi
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build and test
+        run: ./gradlew --no-daemon build
+
+      # Writes a plain Maven layout into build/maven-repo.
+      - name: Stage the Maven artifacts
+        run: ./gradlew --no-daemon publishMavenJavaPublicationToLocalRepoRepository
+
+      # Commit that layout to the maven branch. raw.githubusercontent.com then serves it as a
+      # repository consumers can read without a token, which GitHub Packages cannot do.
+      - name: Publish to the maven branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          REPO="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          WORK="$RUNNER_TEMP/maven-branch"
+          if git clone --depth 1 --branch maven "$REPO" "$WORK" 2>/dev/null; then
+            echo "Updating the existing maven branch"
+          else
+            echo "Creating the maven branch"
+            mkdir -p "$WORK"
+            git -C "$WORK" init -q
+            git -C "$WORK" remote add origin "$REPO"
+            git -C "$WORK" checkout -q --orphan maven
+          fi
+          cp -r build/maven-repo/. "$WORK/"
+          cat > "$WORK/README.md" <<'EOF'
+          This branch is a Maven repository, published by .github/workflows/release.yml.
+          Do not commit to it by hand. See the README on the default branch for how to consume it.
+          EOF
+          git -C "$WORK" add -A
+          if git -C "$WORK" diff --cached --quiet; then
+            echo "Nothing changed"
+          else
+            git -C "$WORK" \
+              -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -q -m "Publish $VERSION"
+            git -C "$WORK" push -q origin HEAD:maven
+          fi
+
+      - name: Publish to GitHub Packages
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./gradlew --no-daemon publishMavenJavaPublicationToGithubPackagesRepository
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          NOTES="$RUNNER_TEMP/notes.md"
+          {
+            echo "## Using this release with Gradle"
+            echo
+            echo '```groovy'
+            echo "repositories {"
+            echo "    maven {"
+            echo "        url 'https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/maven/'"
+            echo "        content { includeGroup 'net.straylightlabs' }"
+            echo "    }"
+            echo "}"
+            echo
+            echo "dependencies {"
+            echo "    implementation 'net.straylightlabs:tivo-libre:${VERSION}'"
+            echo "}"
+            echo '```'
+            echo
+            echo "\`TivoDecoder.jar\` below is the standalone command line app with its"
+            echo "dependencies bundled. \`tivo-libre-${VERSION}.jar\` is the library on its own."
+          } > "$NOTES"
+          gh release create "$TAG" \
+            --title "TivoLibre $VERSION" \
+            --notes-file "$NOTES" \
+            --verify-tag \
+            build/libs/TivoDecoder.jar \
+            "build/libs/tivo-libre-${VERSION}.jar" \
+            "build/libs/tivo-libre-${VERSION}-sources.jar" \
+            "build/libs/tivo-libre-${VERSION}-javadoc.jar"

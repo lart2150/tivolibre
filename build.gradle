@@ -27,7 +27,7 @@ plugins {
 }
 
 group = 'net.straylightlabs'
-version = '0.7.4'
+version = '0.8.0'
 description = 'TivoLibre is a Java library for decoding TiVo files to standard MPEG files'
 
 java {
@@ -83,6 +83,9 @@ dependencies {
 
 tasks.named('test') {
     useJUnit()
+
+    // TivoDecoder.VERSION has to match the version above; VersionTest asserts it.
+    systemProperty 'project.version', project.version.toString()
 
     // TivoDecoderTest decodes a real recording end to end. Supply testFile, outFile and mak
     // (on the command line as -PtestFile=... or in gradle.properties) to run it; without them
@@ -154,6 +157,16 @@ tasks.named('assemble') {
     dependsOn 'appJar'
 }
 
+// Read by the release workflow, which refuses to publish if the tag and this disagree.
+tasks.register('printVersion') {
+    group = 'help'
+    description = 'Prints the project version.'
+    def version = project.version.toString()
+    doLast {
+        println version
+    }
+}
+
 publishing {
     publications {
         mavenJava(MavenPublication) {
@@ -189,6 +202,27 @@ publishing {
     }
 
     repositories {
+        // A plain Maven layout written to the build directory. The release workflow commits this
+        // to the "maven" branch, where raw.githubusercontent.com serves it as a repository that
+        // consumers can read without authenticating. See the README.
+        maven {
+            name = 'localRepo'
+            url = layout.buildDirectory.dir('maven-repo')
+        }
+
+        // GitHub Packages. Publishing needs GITHUB_TOKEN, and unlike the maven branch above,
+        // *reading* from here requires a token too, even for a public repository.
+        maven {
+            name = 'githubPackages'
+            url = 'https://maven.pkg.github.com/lart2150/tivolibre'
+            credentials {
+                username = providers.gradleProperty('githubUser')
+                        .orElse(providers.environmentVariable('GITHUB_ACTOR')).getOrElse('')
+                password = providers.gradleProperty('githubToken')
+                        .orElse(providers.environmentVariable('GITHUB_TOKEN')).getOrElse('')
+            }
+        }
+
         maven {
             name = 'central'
             // OSSRH (oss.sonatype.org) reached end of life on 2025-06-30, so the URL this
@@ -206,7 +240,10 @@ publishing {
 }
 
 signing {
-    // Sign only when actually publishing, so `gradlew build` works without a GPG key.
-    setRequired { gradle.taskGraph.allTasks.any { it.name.startsWith('publish') } }
+    // Only Maven Central requires signatures. Publishing to GitHub or to the maven branch, and
+    // `gradlew build`, all work without a GPG key present.
+    setRequired {
+        gradle.taskGraph.allTasks.any { it.name == 'publishMavenJavaPublicationToCentralRepository' }
+    }
     sign publishing.publications.mavenJava
 }
