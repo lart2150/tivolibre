@@ -89,7 +89,11 @@ jobs:
             git -C "$WORK" push -q origin HEAD:maven
           fi
 
+      # GitHub Packages rejects a version it already holds, so re-running the same tag fails
+      # this step. That is not a reason to fail the release, and the maven branch above is the
+      # route the README recommends anyway.
       - name: Publish to GitHub Packages
+        continue-on-error: true
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -123,11 +127,20 @@ jobs:
             echo "\`TivoDecoder.jar\` below is the standalone command line app with its"
             echo "dependencies bundled. \`tivo-libre-${VERSION}.jar\` is the library on its own."
           } > "$NOTES"
-          gh release create "$TAG" \
-            --title "TivoLibre $VERSION" \
-            --notes-file "$NOTES" \
-            --verify-tag \
-            build/libs/TivoDecoder.jar \
-            "build/libs/tivo-libre-${VERSION}.jar" \
-            "build/libs/tivo-libre-${VERSION}-sources.jar" \
+          ASSETS=(
+            build/libs/TivoDecoder.jar
+            "build/libs/tivo-libre-${VERSION}.jar"
+            "build/libs/tivo-libre-${VERSION}-sources.jar"
             "build/libs/tivo-libre-${VERSION}-javadoc.jar"
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; updating it"
+            gh release edit "$TAG" --title "TivoLibre $VERSION" --notes-file "$NOTES"
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+          else
+            gh release create "$TAG" \
+              --title "TivoLibre $VERSION" \
+              --notes-file "$NOTES" \
+              --verify-tag \
+              "${ASSETS[@]}"
+          fi
