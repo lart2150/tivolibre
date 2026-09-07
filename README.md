@@ -12,13 +12,13 @@ Releases are published to a Maven repository held on this repository's `maven` b
     repositories {
         maven {
             url 'https://raw.githubusercontent.com/lart2150/tivolibre/maven/'
-            content { includeGroup 'net.straylightlabs' }
+            content { includeGroup 'io.github.lart2150' }
         }
         mavenCentral()
     }
 
     dependencies {
-        implementation 'net.straylightlabs:tivo-libre:0.8.0'
+        implementation 'io.github.lart2150:tivo-libre:0.8.0'
     }
 
 The `content { includeGroup ... }` block keeps Gradle from looking there for anything else.
@@ -84,7 +84,7 @@ When used as a stand-alone application, TivoLibre requires commons-codec-1.22.1.
 
 When used as a library, TivoLibre only requires commons-codec-1.22.1.jar (or higher) and slf4j-api.jar. If you wish to view log output from TivoLibre, you'll also need the appropriate SLF4J bindings for your preferred logging framework.
 
-Gradle and Maven users can include these dependencies automatically by including TivoLibre from the Maven Central Repository, where it can be found with the ID *net.straylightlabs.tivo-libre*.
+This fork publishes as *io.github.lart2150:tivo-libre*, from the repository described above. The original project is on Maven Central as *net.straylightlabs:tivo-libre*.
 
 # Known Issues
 A list of known problems is available at https://github.com/fflewddur/tivolibre/issues. You can help us improve TivoLibre by reporting any problems you encounter.

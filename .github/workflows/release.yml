@@ -37,6 +37,7 @@ jobs:
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           VERSION="${TAG#v}"
           BUILD_VERSION=$(./gradlew --no-daemon -q printVersion)
+          GROUP=$(./gradlew --no-daemon -q printGroup)
           echo "Tag $TAG implies version $VERSION; build.gradle says $BUILD_VERSION"
           if [ "$VERSION" != "$BUILD_VERSION" ]; then
             echo "::error::Tag $TAG does not match the version in build.gradle ($BUILD_VERSION)."
@@ -44,6 +45,7 @@ jobs:
           fi
           echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "group=$GROUP"     >> "$GITHUB_OUTPUT"
 
       - name: Build and test
         run: ./gradlew --no-daemon build
@@ -98,6 +100,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
+          GROUP: ${{ steps.version.outputs.group }}
         run: |
           set -euo pipefail
           NOTES="$RUNNER_TEMP/notes.md"
@@ -108,12 +111,12 @@ jobs:
             echo "repositories {"
             echo "    maven {"
             echo "        url 'https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/maven/'"
-            echo "        content { includeGroup 'net.straylightlabs' }"
+            echo "        content { includeGroup '${GROUP}' }"
             echo "    }"
             echo "}"
             echo
             echo "dependencies {"
-            echo "    implementation 'net.straylightlabs:tivo-libre:${VERSION}'"
+            echo "    implementation '${GROUP}:tivo-libre:${VERSION}'"
             echo "}"
             echo '```'
             echo

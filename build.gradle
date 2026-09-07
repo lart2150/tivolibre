@@ -26,7 +26,7 @@ plugins {
     id 'signing'
 }
 
-group = 'net.straylightlabs'
+group = 'io.github.lart2150'
 version = '0.8.0'
 description = 'TivoLibre is a Java library for decoding TiVo files to standard MPEG files'
 
@@ -167,6 +167,16 @@ tasks.register('printVersion') {
     }
 }
 
+// Also read by the release workflow, so the notes it writes cannot drift from the coordinate.
+tasks.register('printGroup') {
+    group = 'help'
+    description = 'Prints the project group.'
+    def projectGroup = project.group.toString()
+    doLast {
+        println projectGroup
+    }
+}
+
 publishing {
     publications {
         mavenJava(MavenPublication) {
@@ -174,7 +184,9 @@ publishing {
             pom {
                 name = 'TivoLibre'
                 description = project.description
-                url = 'https://github.com/fflewddur/tivolibre'
+                // This artifact is built from the fork, so point at where its source actually
+                // lives. The upstream project is credited under developers below.
+                url = 'https://github.com/lart2150/tivolibre'
                 packaging = 'jar'
 
                 licenses {
@@ -189,13 +201,19 @@ publishing {
                         id = 'fflewddur'
                         name = 'Todd Kulesza'
                         email = 'todd@dropline.net'
+                        roles = ['Original author']
+                    }
+                    developer {
+                        id = 'lart2150'
+                        name = 'Brian Engert'
+                        roles = ['Fork maintainer']
                     }
                 }
 
                 scm {
-                    connection = 'scm:git:https://github.com/fflewddur/tivolibre.git'
-                    developerConnection = 'scm:git:https://github.com/fflewddur/tivolibre.git'
-                    url = 'https://github.com/fflewddur/tivolibre.git'
+                    connection = 'scm:git:https://github.com/lart2150/tivolibre.git'
+                    developerConnection = 'scm:git:https://github.com/lart2150/tivolibre.git'
+                    url = 'https://github.com/lart2150/tivolibre.git'
                 }
             }
         }
