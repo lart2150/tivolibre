@@ -219,6 +219,92 @@ class TransportStreamBuilder {
         return this;
     }
 
+    /**
+     * A payload unit start carrying a PES header with @pts and then @payload. The header is the
+     * ordinary shape: a start code, a length, the two flag bytes, and five bytes of timestamp.
+     */
+    TransportStreamBuilder pesPacket(int pid, int streamId, long pts, byte[] payload) {
+        return pesPacket(pid, streamId, pts, payload, payload.length + 8);
+    }
+
+    /**
+     * A payload unit start declaring a PES_packet_length of zero, which is legal and usual for
+     * video in a transport stream and means the unit ends where the next one starts.
+     */
+    TransportStreamBuilder unboundedPesPacket(int pid, int streamId, long pts, byte[] payload) {
+        return pesPacket(pid, streamId, pts, payload, 0);
+    }
+
+    /**
+     * A payload unit start whose PES_packet_length covers @declaredPayloadLength bytes, which can
+     * be more than this packet carries, as it is for a unit continued in the packets behind it.
+     */
+    TransportStreamBuilder pesPacketDeclaring(int pid, int streamId, long pts, byte[] payload,
+                                              int declaredPayloadLength) {
+        return pesPacket(pid, streamId, pts, payload, declaredPayloadLength + 8);
+    }
+
+    private TransportStreamBuilder pesPacket(int pid, int streamId, long pts, byte[] payload,
+                                             int packetLength) {
+        List<Byte> unit = new ArrayList<>();
+        for (byte b : pesHeader(streamId, pts, packetLength)) {
+            unit.add(b);
+        }
+        for (byte b : payload) {
+            unit.add(b);
+        }
+        return packet(pid, true, false, toArray(unit));
+    }
+
+    /** The same, without a timestamp: PTS_DTS_flags clear and no timestamp bytes. */
+    TransportStreamBuilder pesPacketWithoutPts(int pid, int streamId, byte[] payload) {
+        List<Byte> unit = new ArrayList<>();
+        unit.add((byte) 0x00);
+        unit.add((byte) 0x00);
+        unit.add((byte) 0x01);
+        unit.add((byte) streamId);
+        addShort(unit, payload.length + 3);
+        unit.add((byte) 0x80);
+        unit.add((byte) 0x00); // no PTS, no DTS
+        unit.add((byte) 0x00); // PES_header_data_length
+        for (byte b : payload) {
+            unit.add(b);
+        }
+        return packet(pid, true, false, toArray(unit));
+    }
+
+    /**
+     * An adaptation field only packet declaring a discontinuity, which is the shape the decoder
+     * writes where it has cut a region out.
+     */
+    TransportStreamBuilder discontinuityPacket(int pid) {
+        // Built by the decoder rather than copied from it, so a test cannot keep passing against a
+        // shape the decoder has stopped writing.
+        byte[] frame = TransportStreamDecoder.buildDiscontinuityPacket(pid, 0);
+        stream.write(frame, 0, frame.length);
+        return this;
+    }
+
+    /** @packetLength is the PES_packet_length field: bytes after it, or zero for unbounded. */
+    private static byte[] pesHeader(int streamId, long pts, int packetLength) {
+        byte[] header = new byte[14];
+        header[0] = 0x00;
+        header[1] = 0x00;
+        header[2] = 0x01;
+        header[3] = (byte) streamId;
+        header[4] = (byte) ((packetLength >> 8) & 0xff);
+        header[5] = (byte) (packetLength & 0xff);
+        header[6] = (byte) 0x80;  // '10' marker, nothing else set
+        header[7] = (byte) 0x80;  // PTS only
+        header[8] = 0x05;         // PES_header_data_length
+        header[9] = (byte) (0x21 | ((pts >> 29) & 0x0e));
+        header[10] = (byte) ((pts >> 22) & 0xff);
+        header[11] = (byte) (((pts >> 14) & 0xfe) | 0x01);
+        header[12] = (byte) ((pts >> 7) & 0xff);
+        header[13] = (byte) (((pts << 1) & 0xfe) | 0x01);
+        return header;
+    }
+
     /** An arbitrary packet, for cases the helpers above don't cover. */
     TransportStreamBuilder rawPacket(int pid, boolean payloadStart, boolean scrambled, byte[] payload) {
         return packet(pid, payloadStart, scrambled, payload);

@@ -158,6 +158,15 @@ class TransportStreamPacket {
         return header.isScrambled();
     }
 
+    /**
+     * Whether this packet's adaptation field declares a discontinuity. A broadcast sets this where
+     * its own timing or continuity breaks; this decoder sets it on a packet of its own where it has
+     * cut a damaged region out, so reading a decoded recording back finds the cuts again.
+     */
+    public boolean declaresDiscontinuity() {
+        return adaptationField != null && adaptationField.isDiscontinuity();
+    }
+
     public void clearScrambled() {
         byte[] bytes = buffer.array();
         bytes[3] &= ~(0xC0);
@@ -423,7 +432,6 @@ class TransportStreamPacket {
             return isPrivate;
         }
 
-        @SuppressWarnings("unused")
         public boolean isDiscontinuity() {
             return isDiscontinuity;
         }

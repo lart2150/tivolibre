@@ -27,7 +27,7 @@ plugins {
 }
 
 group = 'io.github.lart2150'
-version = '0.8.0'
+version = '0.9.0-alpha1'
 description = 'TivoLibre is a Java library for decoding TiVo files to standard MPEG files'
 
 java {

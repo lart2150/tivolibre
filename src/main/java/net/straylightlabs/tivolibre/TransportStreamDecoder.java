@@ -29,8 +29,11 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -51,15 +54,51 @@ class TransportStreamDecoder extends StreamDecoder {
     private long eventDroppedBytes;
     private long eventDroppedPackets;
     private int resyncEvents;
-    /** PIDs we have written a packet for, the streams an excision can interrupt. */
-    private final Set<Integer> writtenPids = new HashSet<>();
+    /**
+     * PIDs we have written a packet for, the streams an excision can interrupt. A flag per PID
+     * rather than a set: this is touched on every packet written, and boxing a PID above 127 to
+     * re-add it to a set allocates tens of millions of times across a large recording.
+     */
+    private final boolean[] writtenPids = new boolean[PID_COUNT];
+    /**
+     * PIDs whose payload is worth assembling: the announced streams, less the TiVo private data one.
+     * That stream is announced like any other and carries no PES at all, so trying to read units out
+     * of it would report a break for every one of them. Real recordings never mark a payload unit
+     * start on it, but nothing guarantees that.
+     */
+    private final boolean[] assembledPids = new boolean[PID_COUNT];
+    /**
+     * PIDs in the middle of a run of packets that would not decrypt, so the run is reported once.
+     * A flag per PID for the same reason as writtenPids: it is cleared on every delivered packet.
+     */
+    private final boolean[] pidsFailingDecryption = new boolean[PID_COUNT];
     /** PIDs still owed a discontinuity marker after the most recent excision. */
     private final Set<Integer> pidsAwaitingDiscontinuity = new HashSet<>();
     private long discontinuityMarkers;
+    private boolean ended;
+    private boolean usable;
+    /**
+     * Payload withheld from the sink during the current pause. Not the same as the bytes left out
+     * of the output: compatibility mode writes those bytes and still cannot decrypt them.
+     */
+    private long eventUndeliveredBytes;
+    private long eventUndeliveredPackets;
+    /** Null unless a consumer asked for elementary streams instead of, or as well as, bytes. */
+    private final FrameSink frameSink;
+    private final PayloadAssembler assembler;
+    /** Every stream a PMT has announced, in the order the tables named them. */
+    private final Map<Integer, ElementaryStreamInfo> announcedStreams = new LinkedHashMap<>();
+    /**
+     * False for a stream that was decrypted earlier. Nothing is scrambled, so there is no keystream
+     * to lose position against and none of the pause, drop and mask machinery applies.
+     */
+    private final boolean decryptionEnabled;
 
     private static final byte SYNC_BYTE_VALUE = 0x47;
     private static final int PAT_PID = 0x0000;
     private static final int NULL_PACKET_PID = 0x1fff;
+    /** The PID space is 13 bits wide */
+    private static final int PID_COUNT = 0x2000;
     /** Bytes per PMT stream entry: stream_type (1) + elementary_PID (2) + ES_info_length (2) */
     private static final int STREAM_ENTRY_LENGTH = 5;
     /** Fixed PMT fields between section_length and the first stream entry */
@@ -86,14 +125,24 @@ class TransportStreamDecoder extends StreamDecoder {
     /** discontinuity_indicator, the first flag of an adaptation field */
     private static final int DISCONTINUITY_INDICATOR = 0x80;
     private static final byte STUFFING_BYTE = (byte) 0xff;
+    private static final byte[] NO_DESCRIPTORS = new byte[0];
 
     private final static Logger logger = LoggerFactory.getLogger(TransportStreamDecoder.class);
     
     public TransportStreamDecoder(TuringDecoder decoder, int mpegOffset, CountingDataInputStream inputStream,
                                   OutputStream outputStream, boolean compatibilityMode) {
+        this(decoder, mpegOffset, inputStream, outputStream, compatibilityMode, null, true);
+    }
+
+    TransportStreamDecoder(TuringDecoder decoder, int mpegOffset, CountingDataInputStream inputStream,
+                           OutputStream outputStream, boolean compatibilityMode, FrameSink frameSink,
+                           boolean decryptionEnabled) {
         super(decoder, mpegOffset, inputStream, outputStream);
         inputBuffer = ByteBuffer.allocate(TransportStream.FRAME_SIZE);
         this.compatibilityMode = compatibilityMode;
+        this.frameSink = frameSink;
+        this.decryptionEnabled = decryptionEnabled;
+        this.assembler = frameSink == null ? null : new PayloadAssembler(frameSink);
     }
 
     @Override
@@ -132,8 +181,16 @@ class TransportStreamDecoder extends StreamDecoder {
                     // Stuffing that keeps the bit rate constant. Tested before the PMT check
                     // because a garbage PAT naming 0x1fff would otherwise route every one of
                     // these into the table parser and copy them all to the output.
-                    if (!compatibilityMode) {
+                    if (!compatibilityMode && decryptionEnabled) {
                         bytesWritten += packet.length();
+                        continue;
+                    }
+                    if (!decryptionEnabled) {
+                        // Stuffing has nothing in it for anyone, but this path promises to pass
+                        // every byte through, so write it and skip the rest of the work. Routing it
+                        // onward would invent a stream for PID 0x1fff and walk 184 bytes of padding
+                        // looking for PES headers, on up to a third of the packets in a broadcast.
+                        writePacketBytes(NULL_PACKET_PID, packet.getBytes());
                         continue;
                     }
                 } else if (pid == PAT_PID) {
@@ -180,12 +237,51 @@ class TransportStreamDecoder extends StreamDecoder {
         } catch (EOFException e) {
             logger.info("End of file reached");
             logDroppedSummary();
-            return decryptedSomething();
+            return finish(true);
         } catch (IOException e) {
             logger.error("Error reading transport stream: ", e);
+        } finally {
+            // Anything thrown out of the packet loop ends the sink here rather than above, where the
+            // counts are not in reach: a decode that read most of a recording and then failed should
+            // say so, not report that nothing was ever attempted. Only when no other exit already
+            // did it, since building the result a second time would repeat everything it logs.
+            if (!ended) {
+                finish(false);
+            }
         }
 
-        return false;
+        return finish(false);
+    }
+
+    /**
+     * Deliver the tail of the decode: the last payload unit of each stream, then the verdict. A
+     * consumer that is writing a file needs the verdict before it finalizes one, so it arrives even
+     * when the read failed part way through, where @completed is false and the result is unusable
+     * whatever the streams themselves managed.
+     */
+    private boolean finish(boolean completed) {
+        if (ended) {
+            // Idempotent rather than guarded at each call site: an exit that both catches and falls
+            // through would otherwise flush the assembler twice, log the whole verdict twice, and
+            // break the one promise onEnd makes, which is that nothing follows it.
+            return usable;
+        }
+        ended = true;
+        DecodeResult result = buildResult(completed);
+        if (frameSink != null) {
+            if (!assembler.sinkFailed()) {
+                assembler.flush();
+            }
+            try {
+                frameSink.onEnd(result);
+            } catch (RuntimeException e) {
+                // onEnd is the consumer's last word either way, so its failure is not worth
+                // replacing whatever is already on its way out of the decode.
+                logger.error("The consumer threw from onEnd: ", e);
+            }
+        }
+        usable = result.isUsable();
+        return usable;
     }
 
     /**
@@ -208,7 +304,7 @@ class TransportStreamDecoder extends StreamDecoder {
      * writing out payload that was never decrypted. Report failure when packets needed decrypting
      * and not one of them worked; a recording with nothing scrambled at all still succeeds.
      */
-    private boolean decryptedSomething() {
+    private DecodeResult buildResult(boolean completed) {
         long decrypted = 0;
         long failed = 0;
         for (TransportStream stream : streams.values()) {
@@ -218,7 +314,7 @@ class TransportStreamDecoder extends StreamDecoder {
         if (failed > 0) {
             logger.warn("Failed to decrypt {} of {} packets that needed it", failed, decrypted + failed);
         }
-        boolean usable = true;
+        List<Integer> neverDecrypted = new ArrayList<>();
         for (Map.Entry<Integer, TransportStream> entry : streams.entrySet()) {
             TransportStream stream = entry.getValue();
             if (stream.getFailedDecryptionCount() > 0 && stream.getDecryptedPacketCount() == 0) {
@@ -227,14 +323,15 @@ class TransportStreamDecoder extends StreamDecoder {
                 logger.error(String.format(
                         "No packet on PID 0x%04x was ever decrypted, so its output is unusable",
                         entry.getKey()));
-                usable = false;
+                neverDecrypted.add(entry.getKey());
             }
         }
-        if (!usable) {
+        if (!neverDecrypted.isEmpty()) {
             logger.error("At least one stream was never decrypted. This usually means its keys "
                     + "were missing from the TiVo private data stream.");
         }
-        return usable;
+        return new DecodeResult(completed, neverDecrypted, decrypted, failed, droppedBytes,
+                droppedPackets, resyncEvents);
     }
 
     /**
@@ -313,7 +410,20 @@ class TransportStreamDecoder extends StreamDecoder {
                 if (syncedPackets == PACKETS_UNTIL_RESYNC) {
                     // Looks like we re-synchronized!
                     int unsynchronizedLength = currentPos - startPos;
-                    if (unsynchronizedLength > 0) {
+                    if (unsynchronizedLength > 0 && !decryptionEnabled) {
+                        // Nothing was encrypted, so losing sync cost alignment and nothing else.
+                        // Write the run through and carry on: pausing here would discard good data
+                        // to the next megabyte boundary for no reason, and the masking that goes
+                        // with it would corrupt bytes rather than preserve anyone's parity.
+                        resyncEvents++;
+                        logger.debug("Writing {} unsynchronized bytes through", unsynchronizedLength);
+                        outputStream.write(inputBuffer.array(), startPos, unsynchronizedLength);
+                        bytesWritten += unsynchronizedLength;
+                        // The bytes survive, but a stream holding a unit open across the run comes
+                        // back missing its middle. Saying nothing hands the consumer one unit
+                        // spliced out of the two sides of a hole, and calls it whole.
+                        armDiscontinuity(unsynchronizedLength, 0);
+                    } else if (unsynchronizedLength > 0) {
                         resyncEvents++;
                         eventDroppedBytes = 0;
                         eventDroppedPackets = 0;
@@ -390,11 +500,9 @@ class TransportStreamDecoder extends StreamDecoder {
         } else {
             droppedBytes += length;
             eventDroppedBytes += length;
-            // Everything from here to the resume point is about to be cut out of the output, so
-            // every stream that survives it needs to be told its continuity counter and clock
-            // will jump. Arm the marker for each PID we have already written.
-            pidsAwaitingDiscontinuity.clear();
-            pidsAwaitingDiscontinuity.addAll(writtenPids);
+        }
+        if (!compatibilityMode || frameSink != null) {
+            armDiscontinuity(0, 0);
         }
         // Pretend we wrote the extra bytes; we use this offset to determine when to resume decryption
         bytesWritten += length;
@@ -424,6 +532,30 @@ class TransportStreamDecoder extends StreamDecoder {
     /**
      * Tell each stream to stop decrypting packets until its key changes.
      */
+    /**
+     * Mark every stream written so far as owing a discontinuity, reported as each one resumes.
+     * Compatibility mode writes no marker of its own, but a consumer attached to it still has to
+     * hear about the break.
+     *
+     * The magnitude accumulates rather than resetting when a cut lands before the previous one has
+     * drained. A stream can take a whole PSI interval to reappear, so a second cut inside that
+     * window would otherwise report only the newer total to a stream that missed both, and the
+     * older magnitude would reach nobody.
+     */
+    private void armDiscontinuity(long undeliveredBytes, long undeliveredPackets) {
+        if (pidsAwaitingDiscontinuity.isEmpty()) {
+            eventUndeliveredBytes = 0;
+            eventUndeliveredPackets = 0;
+        }
+        eventUndeliveredBytes += undeliveredBytes;
+        eventUndeliveredPackets += undeliveredPackets;
+        for (int pid = 0; pid < PID_COUNT; pid++) {
+            if (writtenPids[pid]) {
+                pidsAwaitingDiscontinuity.add(pid);
+            }
+        }
+    }
+
     private void pauseDecryption() {
         decryptionPaused = true;
         streams.forEach((id, stream) -> stream.pauseDecrypting());
@@ -510,6 +642,7 @@ class TransportStreamDecoder extends StreamDecoder {
         // Ignore the CRC at the end
         sectionLength -= 4;
 
+        List<ElementaryStreamInfo> announced = new ArrayList<>();
         // A PMT section can be longer than the packet carrying it, and each stream entry is at least five
         // bytes, so stop as soon as either the section or the packet runs out.
         while (sectionLength >= STREAM_ENTRY_LENGTH && packet.remainingDataLength() >= STREAM_ENTRY_LENGTH) {
@@ -524,7 +657,12 @@ class TransportStreamDecoder extends StreamDecoder {
             pmtField = packet.readUnsignedShortFromData();
             sectionLength -= 2;
             int esInfoLength = pmtField & 0x0fff;
-            packet.advanceDataOffset(esInfoLength);
+            if (frameSink == null) {
+                packet.advanceDataOffset(esInfoLength);
+            } else {
+                announced.add(new ElementaryStreamInfo(streamPid, streamTypeId,
+                        readDescriptors(packet, esInfoLength), programNumber));
+            }
             sectionLength -= esInfoLength;
 
             // Create a stream for this PID unless one already exists
@@ -536,12 +674,76 @@ class TransportStreamDecoder extends StreamDecoder {
                 streams.put(streamPid, stream);
             }
         }
+        publishProgram(announced);
         if (sectionLength >= STREAM_ENTRY_LENGTH) {
             logger.warn("PMT section continues past the end of its packet; ignoring {} remaining bytes",
                     sectionLength);
         }
 
         return true;
+    }
+
+    /**
+     * Read a stream's ES_info descriptors, clamped to what the packet actually holds. A PMT can
+     * declare a longer ES_info_length than it delivers, either because the section runs into the
+     * next packet or because the recording is damaged, and reading past the end of the buffer
+     * throws where merely advancing the offset past it does not. The offset ends up in the same
+     * place either way, so the parse that follows is unaffected.
+     */
+    private static byte[] readDescriptors(TransportStreamPacket packet, int esInfoLength) {
+        int available = Math.min(esInfoLength, packet.remainingDataLength());
+        byte[] descriptors = available > 0 ? packet.readBytesFromData(available) : NO_DESCRIPTORS;
+        if (available < esInfoLength) {
+            packet.advanceDataOffset(esInfoLength - available);
+        }
+        return trimToWholeDescriptors(descriptors);
+    }
+
+    /**
+     * Cut a descriptor loop back to its last complete entry. A consumer walks these by tag and
+     * length, so half a descriptor at the end is worse than no descriptor: the walk reads a length
+     * whose bytes were never delivered and runs off the end of what it was given.
+     */
+    private static byte[] trimToWholeDescriptors(byte[] descriptors) {
+        int end = 0;
+        while (end + 2 <= descriptors.length) {
+            int length = 2 + (descriptors[end + 1] & 0xff);
+            if (end + length > descriptors.length) {
+                break;
+            }
+            end += length;
+        }
+        return end == descriptors.length ? descriptors : Arrays.copyOf(descriptors, end);
+    }
+
+    /**
+     * Hand the consumer every stream announced so far, whenever that set grows. Always the whole
+     * list rather than what changed: a consumer can diff it against what it had, and one that
+     * cannot add a stream late (Matroska writes its track list before the first frame) needs to see
+     * the full picture to decide what to do about the new arrival.
+     */
+    private void publishProgram(List<ElementaryStreamInfo> announced) {
+        if (frameSink == null) {
+            return;
+        }
+        boolean changed = false;
+        for (ElementaryStreamInfo stream : announced) {
+            // A PID already announced keeps the type it was first given, matching what the decoder
+            // does with the streams themselves.
+            if (announcedStreams.putIfAbsent(stream.getPid(), stream) == null) {
+                assembledPids[stream.getPid()] = TransportStream.StreamType.valueOf(
+                        stream.getStreamType()) != TransportStream.StreamType.PRIVATE_DATA;
+                changed = true;
+            }
+        }
+        if (changed && !assembler.sinkFailed()) {
+            try {
+                frameSink.onProgram(new ArrayList<>(announcedStreams.values()));
+            } catch (RuntimeException e) {
+                assembler.markSinkFailed();
+                throw e;
+            }
+        }
     }
 
     private boolean processTivoPacket(TransportStreamPacket packet) {
@@ -602,7 +804,14 @@ class TransportStreamDecoder extends StreamDecoder {
     private void decryptAndWritePacket(TransportStreamPacket packet) {
         TransportStream stream = getPacketStream(packet);
 
-        byte[] packetBytes = stream.processPacket(packet);
+        // Nothing on this path is encrypted, so there is no PES header offset to track and no
+        // keystream to apply. Handing the packet to the decrypt path anyway would clear the
+        // scrambling bits of anything that happens to have them set, count a failure against a key
+        // nobody supplied, and alter bytes this path promises to pass through untouched.
+        long failuresBefore = frameSink == null ? 0 : stream.getFailedDecryptionCount();
+        byte[] packetBytes = decryptionEnabled ? stream.processPacket(packet) : packet.getBytes();
+        boolean decryptionFailed = frameSink != null
+                && stream.getFailedDecryptionCount() > failuresBefore;
 //        byte[] packetBytes;
 //        if (showDebugOutput) {
 //            packetBytes = stream.processPacket(packet, true, 152);
@@ -615,7 +824,26 @@ class TransportStreamDecoder extends StreamDecoder {
             maskBytes(packetBytes);
         }
 
-        writePacketBytes(packet.getPID(), packetBytes);
+        boolean written = writePacketBytes(packet.getPID(), packetBytes);
+        if (frameSink != null) {
+            if (decryptionPaused) {
+                // Compatibility mode writes these bytes out, but they were never decrypted, so
+                // they are ciphertext however they look. The consumer hears about the gap when the
+                // stream resumes instead. This keeps what the sink sees independent of a mode that
+                // exists only to match another implementation's bytes.
+                eventUndeliveredBytes += packetBytes.length;
+                eventUndeliveredPackets++;
+            } else if (decryptionFailed || stillScrambled(packetBytes)) {
+                // Two ways to reach here with ciphertext: decryption ran and failed, which clears
+                // the scrambling bits before it finds out, or nothing tried at all. The second is
+                // the whole of the decrypt free path, where a compatibility mode recording carries
+                // tens of thousands of packets nobody could decrypt. TiVo leaves PES headers in the
+                // clear, so those parse perfectly and would deliver noise behind a real timestamp.
+                reportFailedDecryption(packet.getPID());
+            } else if (written) {
+                feedSink(packet, packetBytes);
+            }
+        }
 
         if (resumeDecryptionAtByte > 0 && resumeDecryptionAtByte <= bytesWritten) {
             logger.warn(String.format("Resuming decryption at 0x%x, bytesWritten = 0x%x",
@@ -698,19 +926,37 @@ class TransportStreamDecoder extends StreamDecoder {
      * with it.
      */
     private void writeDiscontinuityMarker(int pid, byte[] resumingPacket) throws IOException {
-        if (compatibilityMode || resumingPacket.length <= 3 || !pidsAwaitingDiscontinuity.remove(pid)) {
+        if (pidsAwaitingDiscontinuity.isEmpty() || decryptionPaused || resumingPacket.length <= 3
+                || !pidsAwaitingDiscontinuity.remove(pid)) {
+            // Nothing is reported until the break is over. Compatibility mode reaches here during
+            // the pause as well, because it writes those packets, and reporting there would announce
+            // the break before anything had been counted and leave the resume point silent.
             return;
         }
-        int continuityCounter = ((resumingPacket[3] & 0x0f) - 1) & 0x0f;
-        outputStream.write(buildDiscontinuityPacket(pid, continuityCounter));
-        discontinuityMarkers++;
-        if (logger.isDebugEnabled()) {
-            logger.debug(String.format("Marked a discontinuity on PID 0x%04x, which resumes at "
-                    + "continuity counter %d", pid, resumingPacket[3] & 0x0f));
+        if (!compatibilityMode && decryptionEnabled) {
+            // Never on the decrypt free path: a packet of our own in the output would break the one
+            // promise that path makes, which is that what it reads is what it writes.
+            int continuityCounter = ((resumingPacket[3] & 0x0f) - 1) & 0x0f;
+            outputStream.write(buildDiscontinuityPacket(pid, continuityCounter));
+            discontinuityMarkers++;
+            if (logger.isDebugEnabled()) {
+                logger.debug(String.format("Marked a discontinuity on PID 0x%04x, which resumes at "
+                        + "continuity counter %d", pid, resumingPacket[3] & 0x0f));
+            }
+        }
+        if (frameSink != null && assembledPids[pid]) {
+            // The same moment, reported two ways: a marker for whoever reads the bytes later, and a
+            // break for whoever is consuming the streams now. The counts are what the consumer did
+            // not receive, which is why they are reported in compatibility mode too, where those
+            // bytes reach the output undecrypted rather than being left out of it.
+            assembler.discard(pid);
+            assembler.report(pid, DiscontinuityReason.excision(eventUndeliveredBytes,
+                    eventUndeliveredPackets));
         }
     }
 
-    private static byte[] buildDiscontinuityPacket(int pid, int continuityCounter) {
+    /** Package private so tests build this shape from here rather than copying its layout. */
+    static byte[] buildDiscontinuityPacket(int pid, int continuityCounter) {
         byte[] packet = new byte[TransportStream.FRAME_SIZE];
         packet[0] = SYNC_BYTE_VALUE;
         packet[1] = (byte) ((pid >> 8) & 0x1f);
@@ -728,12 +974,17 @@ class TransportStreamDecoder extends StreamDecoder {
      * filter would have produced, which is what the resume and masking offsets are measured
      * against, so a marker of our own is deliberately left out of it.
      */
-    private void writePacketBytes(int pid, byte[] packetBytes) {
+    private boolean writePacketBytes(int pid, byte[] packetBytes) {
+        boolean written;
         try {
-            if (!decryptionPaused || compatibilityMode) {
+            written = !decryptionPaused || compatibilityMode;
+            if (written) {
                 writeDiscontinuityMarker(pid, packetBytes);
                 outputStream.write(packetBytes);
-                writtenPids.add(pid);
+                if (pid != NULL_PACKET_PID) {
+                    // Stuffing is not a stream, so it is never owed a discontinuity marker
+                    writtenPids[pid] = true;
+                }
             } else {
                 droppedBytes += packetBytes.length;
                 droppedPackets++;
@@ -741,9 +992,86 @@ class TransportStreamDecoder extends StreamDecoder {
                 eventDroppedPackets++;
             }
             bytesWritten += packetBytes.length;
+        } catch (RuntimeException e) {
+            // Sink callbacks run from in here, so this catch sees consumer exceptions as well as
+            // write failures. Rethrowing as a bare RuntimeException used to discard the cause and
+            // label a consumer's bug as a disk error.
+            throw e;
         } catch (Exception e) {
             logger.error("Error writing file: ", e);
-            throw new RuntimeException();
+            throw new RuntimeException("Error writing the decoded stream", e);
         }
+        return written;
+    }
+
+    /**
+     * Hand one packet's payload to the assembler, and report any break that lands on it first, so a
+     * consumer discards what it is holding before the bytes that do not continue it arrive.
+     *
+     * Only streams a PMT announced are fed. A PID nobody declared has no stream_type, so a consumer
+     * cannot tell a muxer what the bytes are, and an unusable stream is worse than an absent one.
+     * That also keeps the indicator below honest: a run of arbitrary bytes from a damaged region can
+     * satisfy the flag checks, and one corpus recording does exactly that on a PID that never
+     * existed.
+     *
+     * The bytes come from @packetBytes rather than from the packet, whose own buffer still holds
+     * ciphertext where the payload was decrypted into a copy.
+     */
+    /**
+     * A packet that needed decrypting and could not be is ciphertext, whatever it looks like, so it
+     * is not handed on: assembling it would produce a unit of noise carrying a plausible timestamp,
+     * which is worse for a consumer than an announced gap.
+     *
+     * Reported once where a run of failures starts rather than once per packet. One corpus recording
+     * fails on thousands of packets in a row, and thousands of identical callbacks would be noise of
+     * a different kind. The run ends when payload for that stream is delivered again.
+     */
+    /**
+     * Whether the packet as written still declares itself scrambled. Read from the output bytes
+     * rather than the packet, whose header holds what the scrambling bits said on arrival and does
+     * not change when decryption clears them.
+     */
+    private static boolean stillScrambled(byte[] packetBytes) {
+        return packetBytes.length > 3 && (packetBytes[3] & 0xc0) != 0;
+    }
+
+    private void reportFailedDecryption(int pid) {
+        if (!assembledPids[pid] || pidsFailingDecryption[pid]) {
+            return;
+        }
+        pidsFailingDecryption[pid] = true;
+        assembler.discard(pid);
+        assembler.report(pid, DiscontinuityReason.decryptionFailed());
+    }
+
+    private void feedSink(TransportStreamPacket packet, byte[] packetBytes) {
+        int pid = packet.getPID();
+        if (!assembledPids[pid]) {
+            return;
+        }
+        pidsFailingDecryption[pid] = false;
+        if (packet.declaresDiscontinuity()) {
+            if (!packet.isPayloadStart()) {
+                // Only a break landing mid unit ruins the unit. When the packet declaring it also
+                // begins a new one, whatever was in flight ended where it always would have, and it
+                // is whole: throwing it away would lose a picture per break on a recording that is
+                // otherwise perfectly good.
+                assembler.discard(pid);
+            }
+            frameSink.onDiscontinuity(pid, DiscontinuityReason.declaredInStream());
+        }
+        int payloadOffset = packet.getHeader().getLength();
+        int payloadLength = packetBytes.length - payloadOffset;
+        if (payloadLength <= 0) {
+            if (packet.isPayloadStart()) {
+                // No payload of its own, but it is still a boundary: an adaptation field can fill a
+                // packet and leave nothing behind it. Letting the unit stay open would hand the
+                // consumer one unit with the next one's continuations spliced onto it.
+                assembler.endUnit(pid);
+            }
+            return;
+        }
+        assembler.accept(pid, packetBytes, payloadOffset, payloadLength,
+                packet.isPayloadStart(), inputStream.getPosition());
     }
 }

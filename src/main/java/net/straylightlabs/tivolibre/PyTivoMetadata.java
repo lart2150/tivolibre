@@ -30,6 +30,7 @@ import org.w3c.dom.NodeList;
 
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -45,6 +46,7 @@ public class PyTivoMetadata {
     private final ZonedDateTime originalAirDate;
     private final int movieYear;
     private final String title;
+    private final String recordedTitle;
     private final String seriesTitle;
     private final String episodeTitle;
     private final String description;
@@ -58,6 +60,7 @@ public class PyTivoMetadata {
     private final int tvRating;
     private final int starRating;
     private final String mpaaRating;
+    private final String showType;
     private final int colorCode;
     private final List<String> programGenres;
     private final List<String> actors;
@@ -127,6 +130,8 @@ public class PyTivoMetadata {
                 builder.originalAirDate(node.getTextContent());
             } else if (nodeEquals(node, "title")) {
                 builder.title(node.getTextContent());
+            } else if (nodeEquals(node, "showType")) {
+                builder.showType(node.getTextContent());
             } else if (nodeEquals(node, "isEpisode")) {
                 builder.isEpisode(node.getTextContent());
             } else if (nodeEquals(node, "episodeNumber")) {
@@ -210,6 +215,11 @@ public class PyTivoMetadata {
         } else {
             title = "Unknown";
         }
+        showType = builder.showType;
+        // The title above is built for a sidecar, which needs one even when the recording gave
+        // none. Keep what was actually read alongside it, so an interface that promises not to
+        // invent values has something true to return.
+        recordedTitle = builder.title;
         seriesTitle = builder.seriesTitle;
         episodeTitle = builder.episodeTitle;
         description = builder.description;
@@ -239,6 +249,131 @@ public class PyTivoMetadata {
 
     public boolean writeToFile(Path filePath) {
         try (PrintWriter writer = new PrintWriter(Files.newBufferedWriter(filePath, StandardOpenOption.CREATE, StandardOpenOption.WRITE))) {
+            writeTo(writer);
+        } catch (IOException e) {
+            logger.error("Error writing to file '{}': ", filePath, e);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * The same text {@link #writeToFile} produces, as a string, for a consumer that wants the
+     * metadata without a file to put it in.
+     */
+    public String toText() {
+        StringWriter out = new StringWriter();
+        try (PrintWriter writer = new PrintWriter(out)) {
+            writeTo(writer);
+        }
+        return out.toString();
+    }
+
+    String getTitle() {
+        return recordedTitle;
+    }
+
+    String getSeriesTitle() {
+        return seriesTitle;
+    }
+
+    String getEpisodeTitle() {
+        return episodeTitle;
+    }
+
+    String getDescription() {
+        return description;
+    }
+
+    ZonedDateTime getAirDate() {
+        return airDate;
+    }
+
+    ZonedDateTime getOriginalAirDate() {
+        return originalAirDate;
+    }
+
+    int getMovieYear() {
+        return movieYear;
+    }
+
+    int getEpisodeNumber() {
+        return episodeNumber;
+    }
+
+    int getShowingBits() {
+        return showingBits;
+    }
+
+    int getTvRating() {
+        return tvRating;
+    }
+
+    int getStarRating() {
+        return starRating;
+    }
+
+    int getColorCode() {
+        return colorCode;
+    }
+
+    boolean isEpisode() {
+        return isEpisode;
+    }
+
+    String getSeriesId() {
+        return seriesId;
+    }
+
+    String getProgramId() {
+        return programId;
+    }
+
+    String getMpaaRating() {
+        return mpaaRating;
+    }
+
+    String getShowType() {
+        return showType;
+    }
+
+    List<String> getProgramGenres() {
+        return programGenres;
+    }
+
+    List<String> getActors() {
+        return actors;
+    }
+
+    List<String> getGuestStars() {
+        return guestStars;
+    }
+
+    List<String> getDirectors() {
+        return directors;
+    }
+
+    List<String> getExecProducers() {
+        return execProducers;
+    }
+
+    List<String> getProducers() {
+        return producers;
+    }
+
+    List<String> getWriters() {
+        return writers;
+    }
+
+    List<String> getHosts() {
+        return hosts;
+    }
+
+    List<String> getChoreographers() {
+        return choreographers;
+    }
+
+    private void writeTo(PrintWriter writer) {
             writeString(writer, "title", title);
             writeString(writer, "seriesTitle", seriesTitle);
             writeString(writer, "episodeTitle", episodeTitle);
@@ -270,13 +405,6 @@ public class PyTivoMetadata {
             writeList(writer, "vWriter", writers);
             writeList(writer, "vHost", hosts);
             writeList(writer, "vChoreographer", choreographers);
-
-        } catch (IOException e) {
-            logger.error("Error writing to file '{}': ", filePath, e);
-            return false;
-        }
-
-        return true;
     }
 
     private void writeString(PrintWriter writer, String field, Object val) {
@@ -319,6 +447,7 @@ public class PyTivoMetadata {
         private int tvRating;
         private int starRating;
         private String mpaaRating;
+        private String showType;
         private int colorCode;
         private List<String> programGenres;
         private List<String> actors;
@@ -420,6 +549,11 @@ public class PyTivoMetadata {
 
         public Builder starRating(String val) {
             starRating = Integer.parseInt(val);
+            return this;
+        }
+
+        public Builder showType(String val) {
+            showType = val;
             return this;
         }
 

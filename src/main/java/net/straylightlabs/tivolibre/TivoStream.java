@@ -50,6 +50,7 @@ class TivoStream {
     private final OutputStream outputStream;
     private boolean processVideo;
     private boolean compatibilityMode;
+    private FrameSink frameSink;
 
     private final static Logger logger = LoggerFactory.getLogger(TivoStream.class);
 
@@ -69,6 +70,10 @@ class TivoStream {
         compatibilityMode = val;
     }
 
+    public void setFrameSink(FrameSink val) {
+        frameSink = val;
+    }
+
     /**
      * Process @inputStream and try to decrypt it, printing the results to @outputStream.
      */
@@ -76,6 +81,11 @@ class TivoStream {
         try (CountingDataInputStream dataInputStream = new CountingDataInputStream(inputStream)) {
             if (!processMetadata(dataInputStream)) {
                 return false;
+            }
+            if (frameSink != null) {
+                // Before any stream, because it describes the recording rather than anything in it,
+                // and a consumer may want the title before it decides what to build.
+                frameSink.onMetadata(TivoMetadata.createFrom(getMetadata()));
             }
             if (processVideo) {
                 if (!processVideo(dataInputStream)) {
@@ -122,11 +132,18 @@ class TivoStream {
         logger.debug("File format: " + header.getFormat());
         switch (header.getFormat()) {
             case PROGRAM_STREAM:
+                if (frameSink != null) {
+                    // The program stream path has no payload reassembly to hang a sink on, and
+                    // failing here is better than reporting a successful decode that delivered
+                    // nothing. No recording in the test corpus takes this path.
+                    throw new UnsupportedOperationException(
+                            "A FrameSink cannot read a program stream recording, only a transport stream");
+                }
                 streamDecoder = new ProgramStreamDecoder(decoder, header.getMpegOffset(), dataInputStream, outputStream);
                 break;
             case TRANSPORT_STREAM:
                 streamDecoder = new TransportStreamDecoder(decoder, header.getMpegOffset(), dataInputStream,
-                        outputStream, compatibilityMode);
+                        outputStream, compatibilityMode, frameSink, true);
                 break;
             default:
                 logger.error("Error: unknown file format.");

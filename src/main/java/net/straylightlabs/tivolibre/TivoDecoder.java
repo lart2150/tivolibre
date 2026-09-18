@@ -38,15 +38,18 @@ public class TivoDecoder {
     private final String mak;
     private final boolean compatibilityMode;
     private TivoStream tivoStream;
+    private FrameSink frameSink;
 
     /** Kept in step with the version in build.gradle by VersionTest. */
-    public final static String VERSION = "0.8.0";
+    public final static String VERSION = "0.9.0-alpha1";
 
-    private TivoDecoder(InputStream inputStream, OutputStream outputStream, String mak, boolean compatibilityMode) {
+    private TivoDecoder(InputStream inputStream, OutputStream outputStream, String mak,
+                        boolean compatibilityMode, FrameSink frameSink) {
         this.inputStream = inputStream;
         this.outputStream = outputStream;
         this.mak = mak;
         this.compatibilityMode = compatibilityMode;
+        this.frameSink = frameSink;
     }
 
     /**
@@ -71,9 +74,22 @@ public class TivoDecoder {
      */
     public boolean decode() {
         verifyInternalState();
-        tivoStream = new TivoStream(inputStream, outputStream, mak);
+        // A sink-only decode still needs somewhere for the decoder to write, since every packet
+        // goes through the same path whether or not anyone wants the bytes.
+        OutputStream target = outputStream == null ? OutputStream.nullOutputStream() : outputStream;
+        TerminatingFrameSink sink = frameSink == null ? null : new TerminatingFrameSink(frameSink);
+        tivoStream = new TivoStream(inputStream, target, mak);
         tivoStream.setCompatibilityMode(compatibilityMode);
-        return tivoStream.process();
+        tivoStream.setFrameSink(sink);
+        try {
+            return tivoStream.process();
+        } finally {
+            // Every way out of a decode ends the sink, including the ones that never reach the
+            // decoder: an unreadable header, an unknown format, an exception from anywhere below.
+            if (sink != null) {
+                sink.endIfAbandoned();
+            }
+        }
     }
 
     /**
@@ -92,8 +108,9 @@ public class TivoDecoder {
      * Most of this is already handled by Builder, but we need to ensure @outputStream exists for non-metadata processing.
      */
     private void verifyInternalState() {
-        if (outputStream == null) {
-            throw new IllegalStateException("Cannot decode a video without an OutputStream");
+        if (outputStream == null && frameSink == null) {
+            throw new IllegalStateException(
+                    "Cannot decode a video without an OutputStream or a FrameSink");
         }
     }
 
@@ -149,6 +166,7 @@ public class TivoDecoder {
         private OutputStream outputStream;
         private String mak;
         private boolean compatibilityMode;
+        private FrameSink frameSink;
 
         /**
          * @param is an input stream representing the .TiVo file to decrypt
@@ -190,13 +208,28 @@ public class TivoDecoder {
         }
 
         /**
+         * Receive demuxed elementary streams instead of, or as well as, container bytes. A sink and
+         * an output stream can both be attached: the sink gets the streams while the file is
+         * written, which is what a consumer wanting the intermediate .ts as well as the streams
+         * needs. Transport streams only; a program stream recording with a sink attached will
+         * refuse to decode rather than silently deliver nothing.
+         *
+         * @param sink where to deliver elementary stream payload units
+         * @return a reference to this Builder object
+         */
+        public Builder frameSink(FrameSink sink) {
+            frameSink = sink;
+            return this;
+        }
+
+        /**
          * Builds a new TivoDecoder instance from the list of given parameters.
          *
          * @return a new TivoDecoder instance
          */
         public TivoDecoder build() {
             verifyInternalState();
-            return new TivoDecoder(inputStream, outputStream, mak, compatibilityMode);
+            return new TivoDecoder(inputStream, outputStream, mak, compatibilityMode, frameSink);
         }
 
         private void verifyInternalState() {

@@ -138,9 +138,13 @@ jobs:
             gh release edit "$TAG" --title "TivoLibre $VERSION" --notes-file "$NOTES"
             gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
+            # A version with a suffix is a pre-release, not the latest release
+            PRERELEASE=""
+            case "$VERSION" in *-*) PRERELEASE="--prerelease" ;; esac
             gh release create "$TAG" \
               --title "TivoLibre $VERSION" \
               --notes-file "$NOTES" \
               --verify-tag \
+              $PRERELEASE \
               "${ASSETS[@]}"
           fi
