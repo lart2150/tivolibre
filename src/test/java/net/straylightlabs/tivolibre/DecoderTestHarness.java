@@ -42,12 +42,16 @@ abstract class DecoderTestHarness {
     TransportStreamDecoder decoder;
 
     boolean decode(TransportStreamBuilder builder) {
+        return decode(builder, false);
+    }
+
+    boolean decode(TransportStreamBuilder builder, boolean compatibilityMode) {
         output = new ByteArrayOutputStream();
         CountingDataInputStream input = new CountingDataInputStream(
                 new ByteArrayInputStream(builder.toByteArray()));
         // TuringDecoder writes the stream and block ids into key[16..19]
         decoder = new TransportStreamDecoder(new TuringDecoder(new byte[Stream.KEY_LENGTH + 4]), 0,
-                input, output, false);
+                input, output, compatibilityMode);
         return decoder.process();
     }
 

@@ -29,6 +29,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -50,6 +51,11 @@ class TransportStreamDecoder extends StreamDecoder {
     private long eventDroppedBytes;
     private long eventDroppedPackets;
     private int resyncEvents;
+    /** PIDs we have written a packet for, the streams an excision can interrupt. */
+    private final Set<Integer> writtenPids = new HashSet<>();
+    /** PIDs still owed a discontinuity marker after the most recent excision. */
+    private final Set<Integer> pidsAwaitingDiscontinuity = new HashSet<>();
+    private long discontinuityMarkers;
 
     private static final byte SYNC_BYTE_VALUE = 0x47;
     private static final int PAT_PID = 0x0000;
@@ -75,6 +81,11 @@ class TransportStreamDecoder extends StreamDecoder {
     private static final int MINIMUM_PACKET_LENGTH = Integer.BYTES;
     private static final int PACKETS_UNTIL_RESYNC = 4;
     private static final int DECRYPTION_PAUSED_INTERVAL = 0x100000;
+    /** adaptation_field_control value for a packet carrying an adaptation field and no payload */
+    private static final int ADAPTATION_FIELD_ONLY = 0x20;
+    /** discontinuity_indicator, the first flag of an adaptation field */
+    private static final int DISCONTINUITY_INDICATOR = 0x80;
+    private static final byte STUFFING_BYTE = (byte) 0xff;
 
     private final static Logger logger = LoggerFactory.getLogger(TransportStreamDecoder.class);
     
@@ -379,6 +390,11 @@ class TransportStreamDecoder extends StreamDecoder {
         } else {
             droppedBytes += length;
             eventDroppedBytes += length;
+            // Everything from here to the resume point is about to be cut out of the output, so
+            // every stream that survives it needs to be told its continuity counter and clock
+            // will jump. Arm the marker for each PID we have already written.
+            pidsAwaitingDiscontinuity.clear();
+            pidsAwaitingDiscontinuity.addAll(writtenPids);
         }
         // Pretend we wrote the extra bytes; we use this offset to determine when to resume decryption
         bytesWritten += length;
@@ -396,6 +412,10 @@ class TransportStreamDecoder extends StreamDecoder {
                             + "(%,d packets) out of the output. Use compatibility mode to keep them.",
                     resyncEvents, droppedBytes, droppedPackets)
             );
+            if (discontinuityMarkers > 0) {
+                logger.info("Wrote {} discontinuity marker(s) where the streams resume after the "
+                        + "missing content", discontinuityMarkers);
+            }
         } else if (resyncEvents > 0) {
             logger.warn(String.format("Recovered from %d loss of synchronization event(s)", resyncEvents));
         }
@@ -595,7 +615,7 @@ class TransportStreamDecoder extends StreamDecoder {
             maskBytes(packetBytes);
         }
 
-        writePacketBytes(packetBytes);
+        writePacketBytes(packet.getPID(), packetBytes);
 
         if (resumeDecryptionAtByte > 0 && resumeDecryptionAtByte <= bytesWritten) {
             logger.warn(String.format("Resuming decryption at 0x%x, bytesWritten = 0x%x",
@@ -660,10 +680,60 @@ class TransportStreamDecoder extends StreamDecoder {
                 (bytes[offset + 2] & 0xFF) << 8 | (bytes[offset + 3] & 0xFF);
     }
 
-    private void writePacketBytes(byte[] packetBytes) {
+    /**
+     * Cutting a damaged region out of the output breaks both the continuity counter and the clock
+     * of every stream that runs through it, and ISO/IEC 13818-1 expects the packet where that shows
+     * to carry the discontinuity indicator. We cannot put it in @resumingPacket: the flag lives in
+     * an adaptation field, and a packet that has none cannot grow one without losing payload. So
+     * announce the break in a packet of our own, written directly ahead of the stream's first
+     * packet back: an adaptation field, no payload, and the indicator set.
+     *
+     * Its continuity counter is one step behind where the stream resumes, which leaves the break
+     * declared on the marker (where the indicator allows it) and the rest of the stream continuous
+     * behind it. Giving the marker the counter the stream left off with instead would push the jump
+     * onto the packet after it, which has no way to say it is expected.
+     *
+     * Only for the default mode. Compatibility mode keeps the damaged region instead of cutting it,
+     * and adding a packet the TiVo DirectShow filter never wrote would break binary compatibility
+     * with it.
+     */
+    private void writeDiscontinuityMarker(int pid, byte[] resumingPacket) throws IOException {
+        if (compatibilityMode || resumingPacket.length <= 3 || !pidsAwaitingDiscontinuity.remove(pid)) {
+            return;
+        }
+        int continuityCounter = ((resumingPacket[3] & 0x0f) - 1) & 0x0f;
+        outputStream.write(buildDiscontinuityPacket(pid, continuityCounter));
+        discontinuityMarkers++;
+        if (logger.isDebugEnabled()) {
+            logger.debug(String.format("Marked a discontinuity on PID 0x%04x, which resumes at "
+                    + "continuity counter %d", pid, resumingPacket[3] & 0x0f));
+        }
+    }
+
+    private static byte[] buildDiscontinuityPacket(int pid, int continuityCounter) {
+        byte[] packet = new byte[TransportStream.FRAME_SIZE];
+        packet[0] = SYNC_BYTE_VALUE;
+        packet[1] = (byte) ((pid >> 8) & 0x1f);
+        packet[2] = (byte) (pid & 0xff);
+        packet[3] = (byte) (ADAPTATION_FIELD_ONLY | (continuityCounter & 0x0f));
+        // With no payload the adaptation field fills the rest of the packet
+        packet[4] = (byte) (TransportStream.FRAME_SIZE - 5);
+        packet[5] = (byte) DISCONTINUITY_INDICATOR;
+        Arrays.fill(packet, 6, packet.length, STUFFING_BYTE);
+        return packet;
+    }
+
+    /**
+     * Bytes written here are the real output. @bytesWritten counts the stream the TiVo DirectShow
+     * filter would have produced, which is what the resume and masking offsets are measured
+     * against, so a marker of our own is deliberately left out of it.
+     */
+    private void writePacketBytes(int pid, byte[] packetBytes) {
         try {
             if (!decryptionPaused || compatibilityMode) {
+                writeDiscontinuityMarker(pid, packetBytes);
                 outputStream.write(packetBytes);
+                writtenPids.add(pid);
             } else {
                 droppedBytes += packetBytes.length;
                 droppedPackets++;

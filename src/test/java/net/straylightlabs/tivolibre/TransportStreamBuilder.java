@@ -196,6 +196,29 @@ class TransportStreamBuilder {
         return packet(pid, true, false, toArray(payload));
     }
 
+    /**
+     * A run of bytes with no sync byte among them, as a signal dropout leaves behind. The decoder
+     * loses synchronization here and resynchronizes on the packets that follow, keeping the run in
+     * compatibility mode and cutting it out otherwise.
+     */
+    TransportStreamBuilder unsynchronizedBytes(int length) {
+        byte[] garbage = new byte[length];
+        java.util.Arrays.fill(garbage, (byte) 0xa5);
+        stream.write(garbage, 0, garbage.length);
+        return this;
+    }
+
+    /**
+     * @count unscrambled packets on @pid, to fill a stream out to a length the decoder measures
+     * against, such as the 1 MB interval it waits for before it resumes decrypting.
+     */
+    TransportStreamBuilder filler(int pid, int count) {
+        for (int i = 0; i < count; i++) {
+            packet(pid, false, false, new byte[0]);
+        }
+        return this;
+    }
+
     /** An arbitrary packet, for cases the helpers above don't cover. */
     TransportStreamBuilder rawPacket(int pid, boolean payloadStart, boolean scrambled, byte[] payload) {
         return packet(pid, payloadStart, scrambled, payload);

@@ -26,6 +26,10 @@ import org.junit.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
 import static net.straylightlabs.tivolibre.TransportStreamBuilder.StreamEntry;
 import static net.straylightlabs.tivolibre.TransportStreamBuilder.TIVO_STREAM_TYPE;
@@ -503,5 +507,92 @@ public class TransportStreamResilienceTest extends DecoderTestHarness {
                 .scrambledPesPacket(0x0031);
 
         assertFalse("A stream that never decrypted reported failure", decode(builder));
+    }
+
+    /**
+     * A stream that runs through an excised region comes out the other side with its continuity
+     * counter and its clock jumped, and ISO/IEC 13818-1 expects the first packet of that PID after
+     * the break to say so. None of the packets we copy verbatim can, so the decoder inserts a
+     * packet of its own ahead of each stream as it resumes.
+     */
+    @Test
+    public void testExcisedRegionIsMarkedDiscontinuous() {
+        TransportStreamBuilder builder = droppedRegion();
+
+        assertTrue("The dropout did not abort the decode", decode(builder));
+        assertEquals("Each stream that survived the gap was marked once, as it resumed",
+                Arrays.asList(0x0031, 0x0000, 0x0064, 0x0037), discontinuityMarkerPids());
+
+        byte[] bytes = output.toByteArray();
+        int marker = indexOfFirstDiscontinuityMarker(bytes);
+        assertEquals("Its only flag is the discontinuity indicator", 0x80, bytes[marker + 5] & 0xff);
+        assertEquals("Its continuity counter is one step behind the packet it precedes, so the "
+                        + "stream carries on continuously from the marker", 0x0f, bytes[marker + 3] & 0x0f);
+        assertEquals("It sits directly ahead of the stream it marks", 0x0031,
+                pidAt(bytes, marker + TransportStream.FRAME_SIZE));
+    }
+
+    /**
+     * Compatibility mode keeps the damaged region rather than cutting it out, so there is no break
+     * to announce, and a packet the TiVo DirectShow filter never wrote would break binary
+     * compatibility with it.
+     */
+    @Test
+    public void testCompatibilityModeMarksNothing() {
+        assertTrue("The dropout did not abort the decode", decode(droppedRegion(), true));
+        assertEquals("Compatibility mode added nothing of its own",
+                Collections.emptyList(), discontinuityMarkerPids());
+    }
+
+    /**
+     * A dropout followed by enough packets to reach the 1 MB boundary where decryption resumes,
+     * then one packet on each of the other PIDs so every stream from before the gap comes back.
+     */
+    private TransportStreamBuilder droppedRegion() {
+        return withKeys()
+                .scrambledPesPacket(0x0031)
+                .unsynchronizedBytes(100)
+                .filler(0x0031, 6000)
+                .pat(1, 0x0064)
+                .pmt(0x0064, 0x0031, new byte[0],
+                        new StreamEntry(0x02, 0x0031),
+                        new StreamEntry(TIVO_STREAM_TYPE, 0x0037))
+                .tivoPrivateData(0x0037, new int[]{0x0031}, new int[]{0xe0}, SET_KEY);
+    }
+
+    /** The PIDs of the adaptation-field-only packets carrying a discontinuity indicator, in order. */
+    private List<Integer> discontinuityMarkerPids() {
+        List<Integer> pids = new ArrayList<>();
+        byte[] bytes = output.toByteArray();
+        for (int i = 0; i + TransportStream.FRAME_SIZE <= bytes.length; i += TransportStream.FRAME_SIZE) {
+            if (isDiscontinuityMarker(bytes, i)) {
+                pids.add(pidAt(bytes, i));
+            }
+        }
+        return pids;
+    }
+
+    private int indexOfFirstDiscontinuityMarker(byte[] bytes) {
+        for (int i = 0; i + TransportStream.FRAME_SIZE <= bytes.length; i += TransportStream.FRAME_SIZE) {
+            if (isDiscontinuityMarker(bytes, i)) {
+                return i;
+            }
+        }
+        throw new AssertionError("No discontinuity marker in the output");
+    }
+
+    /**
+     * A whole packet carrying an adaptation field, no payload and the discontinuity indicator. The
+     * length check matters: compatibility mode copies the dropout itself into the output, and a run
+     * of arbitrary bytes read as a packet header can satisfy the flags alone.
+     */
+    private static boolean isDiscontinuityMarker(byte[] bytes, int offset) {
+        return bytes[offset] == 0x47 && (bytes[offset + 3] & 0x30) == 0x20
+                && (bytes[offset + 4] & 0xff) == TransportStream.FRAME_SIZE - 5
+                && (bytes[offset + 5] & 0x80) == 0x80;
+    }
+
+    private static int pidAt(byte[] bytes, int offset) {
+        return ((bytes[offset + 1] & 0x1f) << 8) | (bytes[offset + 2] & 0xff);
     }
 }
