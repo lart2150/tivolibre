@@ -1,0 +1,116 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "io.github.lart2150",
+    "module": "tivo-libre",
+    "version": "0.9.0-alpha1",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "9.7.1"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 11,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api"
+      },
+      "files": [
+        {
+          "name": "tivo-libre-0.9.0-alpha1.jar",
+          "url": "tivo-libre-0.9.0-alpha1.jar",
+          "size": 106865,
+          "sha512": "7a9c34164399a406ff0fce721e236dbba2177eee45c3d465187c40685c326f3cdd178fc6f6cc0efb2a8eb96757c971ba755aad7debfe975655c011bf4532713c",
+          "sha256": "d60477b4e09080ca9bdc22bfed0a54f8bf76744b38cca4d33cb6dccb3d5b7e5d",
+          "sha1": "cf4876c17ca58878d170de3afdfb7afb41807946",
+          "md5": "648516e5299f8eccd3731f43f29d0cd1"
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 11,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime"
+      },
+      "dependencies": [
+        {
+          "group": "org.slf4j",
+          "module": "slf4j-api",
+          "version": {
+            "requires": "2.0.19"
+          }
+        },
+        {
+          "group": "commons-codec",
+          "module": "commons-codec",
+          "version": {
+            "requires": "1.22.1"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "tivo-libre-0.9.0-alpha1.jar",
+          "url": "tivo-libre-0.9.0-alpha1.jar",
+          "size": 106865,
+          "sha512": "7a9c34164399a406ff0fce721e236dbba2177eee45c3d465187c40685c326f3cdd178fc6f6cc0efb2a8eb96757c971ba755aad7debfe975655c011bf4532713c",
+          "sha256": "d60477b4e09080ca9bdc22bfed0a54f8bf76744b38cca4d33cb6dccb3d5b7e5d",
+          "sha1": "cf4876c17ca58878d170de3afdfb7afb41807946",
+          "md5": "648516e5299f8eccd3731f43f29d0cd1"
+        }
+      ]
+    },
+    {
+      "name": "javadocElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "javadoc",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "tivo-libre-0.9.0-alpha1-javadoc.jar",
+          "url": "tivo-libre-0.9.0-alpha1-javadoc.jar",
+          "size": 161326,
+          "sha512": "119587e22c47e9881bcb50cc277c9f9d733c91e8d420fd8b20e79b59dbc7927b110be0eac1610a25c85bd91caf9c04fc84ca90f7ed14716bbdfc14e9dc087968",
+          "sha256": "716aca81b5062b7cf7c5dfe78e53f9dbbbe7aaf9cb0bc8ac5c6adb4ae49d8db1",
+          "sha1": "486739b3de541d581b3dba1b1bd6f38f9ad07ae2",
+          "md5": "2a0e66f1667fd630529a2b1746b5934b"
+        }
+      ]
+    },
+    {
+      "name": "sourcesElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "tivo-libre-0.9.0-alpha1-sources.jar",
+          "url": "tivo-libre-0.9.0-alpha1-sources.jar",
+          "size": 91299,
+          "sha512": "79ef08bbf3d7384aa38de69d1568269fa79f5bb299232bef6db7d7719803dcbd57e197e89ffa3207493e6ea7adfd492565a8e43bd46ba65dfe12ad67a4abe65d",
+          "sha256": "a9997815b46fe75f3a876c4afcecd3fb216a0eda01a80dd9b1febbcf9ebf0a08",
+          "sha1": "11d41de4426418a2d850890a627fd8ed25f35943",
+          "md5": "36af6ada28cc0949a4cbfc12f24692d9"
+        }
+      ]
+    }
+  ]
+}
